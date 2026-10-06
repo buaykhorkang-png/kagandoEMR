@@ -6,6 +6,7 @@ const { hashPassword, verifyPassword } = require('../security/passwords');
 const { cleanText } = require('../security/validation');
 const { recordAudit } = require('../services/audit');
 const { withTransaction } = require('../services/transaction');
+const { getPermissions } = require('../middleware/auth');
 
 const router = express.Router();
 const loginLimiter = rateLimit({
@@ -22,7 +23,7 @@ const registrationLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many registration attempts. Try again later.' }
 });
-const registrationRoles = ['clinician', 'pharmacist', 'clerk'];
+const registrationRoles = ['clinician', 'nurse', 'pharmacist', 'clerk', 'laboratory'];
 
 router.get('/registration-options', async (req, res) => {
   const result = await pool.query(
@@ -159,15 +160,33 @@ router.post('/login', loginLimiter, async (req, res) => {
     mustChangePassword: user.must_change_password
   };
 
-  return res.json({ user: req.session.user });
+  return res.json({ user: { ...req.session.user, permissions: await getPermissions(user.id, user.role) } });
 });
 
-router.get('/me', (req, res) => {
+router.get('/me', async (req, res) => {
   if (!req.session.user) {
     return res.json({ user: null });
   }
 
-  return res.json({ user: req.session.user });
+  const result = await pool.query(
+    `SELECT id, username, role, must_change_password
+     FROM users WHERE id = $1 AND is_active = TRUE`,
+    [req.session.user.id]
+  );
+  if (!result.rowCount) {
+    await destroySession(req);
+    return res.json({ user: null });
+  }
+  const account = result.rows[0];
+  req.session.user = {
+    id: account.id,
+    username: account.username,
+    role: account.role,
+    mustChangePassword: account.must_change_password
+  };
+  return res.json({
+    user: { ...req.session.user, permissions: await getPermissions(account.id, account.role) }
+  });
 });
 
 router.post('/change-password', async (req, res) => {
@@ -198,7 +217,12 @@ router.post('/change-password', async (req, res) => {
 
   if (!updated) return res.status(409).json({ error: 'Password change is not required for this account.' });
   req.session.user.mustChangePassword = false;
-  return res.json({ user: req.session.user });
+  return res.json({
+    user: {
+      ...req.session.user,
+      permissions: await getPermissions(req.session.user.id, req.session.user.role)
+    }
+  });
 });
 
 router.post('/logout', async (req, res) => {

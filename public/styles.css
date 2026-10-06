@@ -98,6 +98,13 @@ a { color: inherit; }
 .search-box input { padding-left: 14px; background: var(--surface); }
 .content-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 22px; align-items: start; }
 .section-block { min-width: 0; border-top: 2px solid var(--green-deep); }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 0 0 28px; }
+.stat-card { min-width: 0; min-height: 112px; display: flex; align-items: flex-start; gap: 14px; padding: 18px; border: 1px solid var(--line); border-top: 3px solid var(--green); border-radius: 9px; background: var(--surface); box-shadow: 0 4px 12px rgba(18,59,90,.04); }
+.stat-icon { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border-radius: 9px; color: var(--green-deep); background: var(--green-soft); font-size: 14px; font-weight: 800; }
+.stat-copy { min-width: 0; display: grid; gap: 5px; }
+.stat-copy > span { color: var(--muted); font-size: 11px; font-weight: 700; }
+.stat-copy strong { color: var(--ink); font-size: 27px; line-height: 1; }
+.stat-copy small { color: var(--muted); font-size: 10px; line-height: 1.4; }
 .section-head { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
 .section-head h2 { margin: 0; color: var(--green-deep); font: 700 17px/1.35 Inter, system-ui, sans-serif; }
 .section-head span { color: var(--muted); font-size: 11px; }
@@ -123,6 +130,28 @@ td strong { color: var(--ink); font-size: 13px; }
 .notice { margin: 0; padding: 11px 12px; border-left: 3px solid var(--green); border-radius: 0 6px 6px 0; color: var(--green-deep); background: var(--green-soft); font-size: 12px; line-height: 1.5; }
 .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 8px; border-radius: 20px; color: var(--green-deep); background: var(--green-soft); font-size: 10px; font-weight: 750; text-transform: capitalize; }
 .badge.dispensed { color: var(--acid); background: var(--surface-alt); }
+.badge.priority-high { color: #9a3412; background: #ffedd5; }
+.nursing-queue { margin-bottom: 24px; }
+.clinician-queue, .consultation-workspace { margin-bottom: 24px; }
+.consultation-workspace { padding-bottom: 18px; }
+.consultation-workspace > .detail-facts { margin: 16px 0; }
+.consultation-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.stock-new-medicine { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-alt); }
+.stock-new-medicine h3 { margin: 0; color: var(--green-deep); font-size: 14px; }
+.stock-new-medicine .field-hint { margin: 0; }
+.stock-new-medicine .detail-facts { padding: 0; background: transparent; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(15, 35, 50, .58); }
+.triage-modal { width: min(780px, 100%); max-height: min(92vh, 900px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 24px 80px rgba(11, 34, 51, .28); }
+.triage-modal-head { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.triage-modal-head h2 { margin: 0; color: var(--ink); font-size: 22px; }
+.triage-modal-head p:not(.eyebrow) { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.triage-context { display: grid; grid-template-columns: 130px 1fr; gap: 8px 12px; margin: 16px 0; padding: 12px; border-radius: 8px; background: var(--surface-alt); font-size: 12px; }
+.triage-context strong { color: var(--ink); }
+.triage-context span { color: var(--muted); }
+.triage-form { display: grid; gap: 14px; }
+.triage-form .detail-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; background: transparent; }
+.triage-form .field input, .triage-form .field select { min-width: 0; }
+.triage-form .button-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .form-page { max-width: 650px; padding: 18px 0; border-top: 2px solid var(--ink); }
 .form-page .form-stack { max-width: none; }
 .staff-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end; padding: 16px 0; border-top: 1px solid var(--line); }
@@ -136,6 +165,8 @@ td strong { color: var(--ink); font-size: 13px; }
   .content-grid { grid-template-columns: 1fr; }
   .detail-panel { max-width: 720px; }
   .staff-form { grid-template-columns: 1fr 1fr; }
+  .consultation-actions { grid-template-columns: 1fr; }
+  .triage-form .detail-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .login-shell { grid-template-columns: 1fr; }
@@ -161,6 +192,13 @@ td strong { color: var(--ink); font-size: 13px; }
   .table-wrap { margin-right: -16px; }
   th, td { padding: 10px 8px; }
   .staff-form { grid-template-columns: 1fr; }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .stat-card { min-height: 100px; gap: 9px; padding: 12px; }
+  .stat-icon { width: 30px; height: 30px; flex-basis: 30px; }
+  .stat-copy strong { font-size: 23px; }
+  .triage-modal { max-height: 96vh; padding: 16px; }
+  .triage-form .detail-facts { grid-template-columns: 1fr; }
+  .triage-context { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }

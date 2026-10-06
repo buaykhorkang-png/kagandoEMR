@@ -11,6 +11,12 @@ const authRoutes = require('./routes/auth');
 const patientRoutes = require('./routes/patients');
 const prescriptionRoutes = require('./routes/prescriptions');
 const adminRoutes = require('./routes/admin');
+const visitsRoutes = require('./routes/visits');
+const pharmacyRoutes = require('./routes/pharmacy');
+const dashboardRoutes = require('./routes/dashboard');
+const reportsRoutes = require('./routes/reports');
+const workflowRoutes = require('./routes/workflow');
+const { requireAuth, requirePermission } = require('./middleware/auth');
 
 if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
   throw new Error('SESSION_SECRET must contain at least 32 characters.');
@@ -58,10 +64,27 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: false, fallthrough: true }));
 app.get('/', (req, res) => res.render('index'));
+for (const [url, permission] of [
+  ['/clerk/dashboard', 'dashboard.clerk'],
+  ['/nursing/dashboard', 'dashboard.nursing'],
+  ['/clinical/dashboard', 'dashboard.clinical'],
+  ['/pharmacy/dashboard', 'dashboard.pharmacy'],
+  ['/laboratory/dashboard', 'dashboard.laboratory'],
+  ['/management/dashboard', 'dashboard.management'],
+  ['/admin/dashboard', 'dashboard.administration'],
+  ['/clinical/consultation', 'consultation.start']
+]) {
+  app.get(url, requireAuth, requirePermission(permission), (req, res) => res.render('index'));
+}
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
+app.use('/api/visits', visitsRoutes);
 app.use('/api/prescriptions', prescriptionRoutes);
+app.use('/api/pharmacy', pharmacyRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/reports', reportsRoutes);
+app.use('/api/workflow', workflowRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -70,8 +93,13 @@ app.use((error, req, res, next) => {
     return next(error);
   }
 
-  const status = error.type === 'entity.parse.failed' ? 400 : 500;
-  return res.status(status).json({ error: status === 400 ? 'Invalid request body.' : 'Internal server error.' });
+  const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
+    ? error.statusCode
+    : error.type === 'entity.parse.failed' ? 400 : 500;
+  const message = status === 500
+    ? 'Internal server error.'
+    : error.type === 'entity.parse.failed' ? 'Invalid request body.' : error.message;
+  return res.status(status).json({ error: message });
 });
 
 if (require.main === module) {
