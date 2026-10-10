@@ -87,11 +87,17 @@ async function getDashboard(req, res) {
     if (dashboard === 'laboratory') {
       const result = await client.query(
         `SELECT
-           (SELECT COUNT(*)::int FROM lab_requests WHERE status = 'pending') AS "pendingLabRequests",
-           (SELECT COUNT(*)::int FROM lab_requests WHERE status = 'in_progress') AS "inProgressLabRequests",
-           (SELECT COUNT(*)::int FROM lab_requests WHERE status = 'completed' AND completed_at::date = CURRENT_DATE) AS "completedLabRequests",
+           (SELECT COUNT(*)::int FROM lab_requests WHERE status IN ('pending', 'collected', 'received')) AS "pendingLabRequests",
+           (SELECT COUNT(*)::int FROM lab_requests WHERE status IN ('processing', 'result_entered', 'verified', 'correction_pending', 'in_progress')) AS "inProgressLabRequests",
+           (SELECT COUNT(*)::int FROM lab_requests WHERE status IN ('released', 'corrected', 'completed') AND completed_at::date = CURRENT_DATE) AS "completedLabRequests",
+           (SELECT COUNT(*)::int FROM lab_requests lr WHERE lr.status = 'verified' OR
+             lr.status = 'correction_pending' AND EXISTS (
+               SELECT 1 FROM lab_result_versions rv WHERE rv.request_id = lr.id AND rv.status = 'verified'
+             )) AS "awaitingRelease",
+           (SELECT COUNT(*)::int FROM lab_requests WHERE status = 'rejected' AND rejected_at::date = CURRENT_DATE) AS "rejectedLabRequests",
            (SELECT COUNT(*)::int FROM lab_requests lr JOIN visits v ON v.id = lr.visit_id
-             WHERE lr.status IN ('pending', 'in_progress') AND v.triage_priority IN ('urgent', 'critical')) AS "urgentLabRequests"`
+             WHERE lr.status IN ('pending', 'collected', 'received', 'processing', 'result_entered', 'verified', 'correction_pending', 'in_progress')
+               AND (lr.priority IN ('urgent', 'stat') OR v.triage_priority IN ('urgent', 'critical'))) AS "urgentLabRequests"`
       );
       return result.rows[0];
     }
@@ -104,7 +110,7 @@ async function getDashboard(req, res) {
            (SELECT COUNT(*)::int FROM visits WHERE visit_date::date = CURRENT_DATE) AS "consultationsToday",
            (SELECT COUNT(*)::int FROM appointments WHERE scheduled_at::date = CURRENT_DATE AND status <> 'cancelled') AS "appointmentsToday",
            (SELECT COUNT(*)::int FROM prescriptions WHERE status IN ('pending', 'active', 'partially_dispensed')) AS "pendingPrescriptions",
-           (SELECT COUNT(*)::int FROM lab_requests WHERE status IN ('pending', 'in_progress')) AS "pendingLabRequests"`
+           (SELECT COUNT(*)::int FROM lab_requests WHERE status IN ('pending', 'collected', 'received', 'processing', 'result_entered', 'verified', 'correction_pending', 'in_progress')) AS "pendingLabRequests"`
       );
       return result.rows[0];
     }

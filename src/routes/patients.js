@@ -9,9 +9,12 @@ async function generateMedicalRecordNumber(client, preferredNumber) {
   const sanitizedPreferred = cleanText(preferredNumber || '', 40);
   if (sanitizedPreferred && /^[a-zA-Z0-9-]+$/.test(sanitizedPreferred)) {
     const existing = await client.query('SELECT 1 FROM patients WHERE medical_record_number = $1', [sanitizedPreferred]);
-    if (!existing.rowCount) {
-      return sanitizedPreferred;
+    if (existing.rowCount) {
+      const duplicateNumberError = new Error('That medical record number is already assigned to another patient.');
+      duplicateNumberError.statusCode = 409;
+      throw duplicateNumberError;
     }
+    return sanitizedPreferred;
   }
 
   const configuredPrefix = await client.query(
@@ -41,6 +44,8 @@ function validDemographics(body) {
   const address = cleanText(body.address || '', 5000);
   const nextOfKinName = cleanText(body.nextOfKinName || '', 200);
   const nextOfKinContact = cleanText(body.nextOfKinContact || '', 100);
+  const nextOfKinRelationship = cleanText(body.nextOfKinRelationship || '', 80);
+  const previousMedicalHistory = cleanText(body.previousMedicalHistory || '', 12000);
 
   if ((medicalRecordNumber !== '' && !/^[a-zA-Z0-9-]+$/.test(medicalRecordNumber)) ||
       !firstName || !lastName || !isDateOnly(dateOfBirth) ||
@@ -59,8 +64,49 @@ function validDemographics(body) {
     phoneNumber: phoneNumber || null,
     address: address || null,
     nextOfKinName: nextOfKinName || null,
-    nextOfKinContact: nextOfKinContact || null
+    nextOfKinContact: nextOfKinContact || null,
+    nextOfKinRelationship: nextOfKinRelationship || null,
+    previousMedicalHistory: previousMedicalHistory || null
   };
+}
+
+async function findLikelyDuplicate(client, demographics) {
+  if (!demographics.dateOfBirth || !demographics.firstName || !demographics.lastName) {
+    return null;
+  }
+
+  const result = await client.query(
+    `SELECT id, medical_record_number, first_name, last_name, date_of_birth, phone_number
+     FROM patients
+     WHERE archived_at IS NULL
+       AND lower(first_name) = lower($1)
+       AND lower(last_name) = lower($2)
+       AND date_of_birth = $3::date
+       AND ((phone_number IS NOT NULL AND $4::text IS NOT NULL AND lower(phone_number) = lower($4::text))
+            OR ($5::text IS NOT NULL AND lower(address) = lower($5::text)))
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [demographics.firstName, demographics.lastName, demographics.dateOfBirth,
+      demographics.phoneNumber || null, demographics.address || null]
+  );
+
+  if (result.rowCount) {
+    return result.rows[0];
+  }
+
+  const broader = await client.query(
+    `SELECT id, medical_record_number, first_name, last_name, date_of_birth
+     FROM patients
+     WHERE archived_at IS NULL
+       AND lower(first_name) = lower($1)
+       AND lower(last_name) = lower($2)
+       AND date_of_birth = $3::date
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [demographics.firstName, demographics.lastName, demographics.dateOfBirth]
+  );
+
+  return broader.rowCount ? broader.rows[0] : null;
 }
 
 router.get('/', requireAuth, requirePermission('patients.view'), async (req, res) => {
@@ -107,15 +153,26 @@ router.get('/', requireAuth, requirePermission('patients.view'), async (req, res
 
 router.post('/', requireAuth, requirePermission('patients.create'), async (req, res) => {
   const demographics = validDemographics(req.body || {});
-  if (!demographics) return res.status(400).json({ error: 'Enter a valid name and date of birth.' });
+  if (!demographics) {
+    return res.status(400).json({
+      error: 'Enter valid patient details. First and last name are required; date of birth and age must be valid when provided.'
+    });
+  }
 
   const patient = await withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('patient-mrn-generation'))");
+    const duplicate = await findLikelyDuplicate(client, demographics);
+    if (duplicate) {
+      const duplicateError = new Error('A patient with the same identifying details already exists. Review the existing record before creating a new one.');
+      duplicateError.statusCode = 409;
+      throw duplicateError;
+    }
+
     const medicalRecordNumber = await generateMedicalRecordNumber(client, demographics.medicalRecordNumber);
     const result = await client.query(
-      `INSERT INTO patients (medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, registration_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-       RETURNING id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, registration_date, updated_at`,
+      `INSERT INTO patients (medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, next_of_kin_relationship, previous_medical_history, registration_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+       RETURNING id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, next_of_kin_relationship, previous_medical_history, registration_date, updated_at`,
       [
         medicalRecordNumber,
         demographics.firstName,
@@ -127,7 +184,9 @@ router.post('/', requireAuth, requirePermission('patients.create'), async (req, 
         demographics.phoneNumber,
         demographics.address,
         demographics.nextOfKinName,
-        demographics.nextOfKinContact
+        demographics.nextOfKinContact,
+        demographics.nextOfKinRelationship,
+        demographics.previousMedicalHistory
       ]
     );
     await recordAudit(client, {
@@ -183,13 +242,23 @@ router.patch('/:id', requireAuth, requirePermission('patients.edit'), async (req
   }
 
   const patient = await withTransaction(async (client) => {
+    const duplicate = await findLikelyDuplicate(client, demographics);
+    if (duplicate && duplicate.id !== req.params.id) {
+      const duplicateError = new Error('A different patient record already matches these identifying details. Confirm the patient identity before saving changes.');
+      duplicateError.statusCode = 409;
+      throw duplicateError;
+    }
+
     const result = await client.query(
       `UPDATE patients
        SET medical_record_number = $1, first_name = $2, middle_name = $3, last_name = $4,
            gender = $5, date_of_birth = $6, age = $7, phone_number = $8, address = $9,
-           next_of_kin_name = $10, next_of_kin_contact = $11, updated_at = NOW()
-       WHERE id = $12 AND archived_at IS NULL
-       RETURNING id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, updated_at`,
+           next_of_kin_name = $10, next_of_kin_contact = $11, next_of_kin_relationship = $12,
+           previous_medical_history = $13, updated_at = NOW()
+       WHERE id = $14 AND archived_at IS NULL
+       RETURNING id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age,
+                 phone_number, address, next_of_kin_name, next_of_kin_contact,
+                 next_of_kin_relationship, previous_medical_history, updated_at`,
       [
         demographics.medicalRecordNumber,
         demographics.firstName,
@@ -202,6 +271,8 @@ router.patch('/:id', requireAuth, requirePermission('patients.edit'), async (req
         demographics.address,
         demographics.nextOfKinName,
         demographics.nextOfKinContact,
+        demographics.nextOfKinRelationship,
+        demographics.previousMedicalHistory,
         req.params.id
       ]
     );
@@ -254,8 +325,8 @@ router.get('/:id', requireAuth, requirePermission('patients.view'), async (req, 
   const includeClinical = ['clinician', 'nurse'].includes(req.user.role);
   const patient = await withTransaction(async (client) => {
     const columns = includeClinical
-      ? 'id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, diagnoses, treatment_notes, allergies, registration_date, created_at, updated_at'
-      : 'id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, registration_date, created_at, updated_at';
+      ? 'id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, next_of_kin_relationship, previous_medical_history, diagnoses, treatment_notes, allergies, registration_date, created_at, updated_at'
+      : 'id, medical_record_number, first_name, middle_name, last_name, gender, date_of_birth, age, phone_number, address, next_of_kin_name, next_of_kin_contact, next_of_kin_relationship, previous_medical_history, registration_date, created_at, updated_at';
     const assignmentFilter = req.user.role === 'clinician'
       ? 'AND EXISTS (SELECT 1 FROM patient_care_team pct WHERE pct.patient_id = patients.id AND pct.clinician_id = $2)'
       : req.user.role === 'nurse'
@@ -285,8 +356,23 @@ router.get('/:id', requireAuth, requirePermission('patients.view'), async (req, 
       : { rows: [] };
     const labRequests = includeClinical
       ? await client.query(
-        `SELECT id, visit_id, test_name, clinical_notes, result, status, requested_at, completed_at
-         FROM lab_requests WHERE patient_id = $1 ORDER BY requested_at DESC LIMIT 50`,
+        `SELECT lr.id, lr.request_number, lr.visit_id, lr.test_id, lr.test_name, v.queue_number,
+                lr.clinical_indication, lr.specimen_requirements, lr.priority, lr.status, lr.requested_by,
+                lr.requested_at, lr.completed_at,
+                COALESCE(trim_scale(latest.numeric_value)::text, latest.qualitative_value, latest.text_value,
+                  CASE WHEN lr.status IN ('released', 'corrected', 'completed') THEN lr.result END) AS result,
+                latest.result_type, latest.unit, latest.reference_range, latest.comments,
+                latest.version_number, latest.released_at
+         FROM lab_requests lr
+         JOIN visits v ON v.id = lr.visit_id AND v.patient_id = lr.patient_id
+         LEFT JOIN LATERAL (
+           SELECT rv.result_type, rv.numeric_value, rv.qualitative_value, rv.text_value,
+                  rv.unit, rv.reference_range, rv.comments, rv.version_number, rv.released_at
+           FROM lab_result_versions rv
+           WHERE rv.request_id = lr.id AND rv.released_at IS NOT NULL
+           ORDER BY rv.version_number DESC LIMIT 1
+         ) latest ON TRUE
+         WHERE lr.patient_id = $1 ORDER BY lr.requested_at DESC LIMIT 50`,
         [req.params.id])
       : { rows: [] };
 

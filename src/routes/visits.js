@@ -137,7 +137,8 @@ router.patch('/:id/complete', requireAuth, requirePermission('consultation.compl
       `UPDATE visits v SET diagnosis = $2, treatment_notes = $3, follow_up = $4,
          symptoms = $5, clinical_examination = $6, clinical_completed = TRUE,
          status = CASE
-           WHEN EXISTS (SELECT 1 FROM lab_requests lr WHERE lr.visit_id = v.id AND lr.status IN ('pending', 'in_progress')) THEN 'lab_requested'
+           WHEN EXISTS (SELECT 1 FROM lab_requests lr WHERE lr.visit_id = v.id
+             AND lr.status IN ('pending', 'collected', 'received', 'processing', 'result_entered', 'verified', 'correction_pending', 'in_progress')) THEN 'lab_requested'
            WHEN EXISTS (SELECT 1 FROM prescriptions p WHERE p.consultation_id = v.id AND p.status IN ('active', 'pending', 'partially_dispensed')) THEN 'pharmacy_pending'
            ELSE 'completed' END
        WHERE v.id = $1 AND v.clinician_id = $7 AND v.status = 'in_consultation'

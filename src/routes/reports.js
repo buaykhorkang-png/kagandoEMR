@@ -1,5 +1,6 @@
 const express = require('express');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const { isDateOnly } = require('../security/validation');
 const { withTransaction } = require('../services/transaction');
 
 const router = express.Router();
@@ -7,11 +8,16 @@ const router = express.Router();
 function getDateWindow(req) {
   const startDate = req.query.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const endDate = req.query.endDate || new Date().toISOString().slice(0, 10);
+  if (!isDateOnly(startDate) || !isDateOnly(endDate) || startDate > endDate) {
+    return null;
+  }
   return { startDate, endDate };
 }
 
 router.get('/daily', requireAuth, requirePermission('reports.view'), async (req, res) => {
-  const { startDate, endDate } = getDateWindow(req);
+  const dateWindow = getDateWindow(req);
+  if (!dateWindow) return res.status(400).json({ error: 'Provide a valid date range.' });
+  const { startDate, endDate } = dateWindow;
 
   const summary = await withTransaction(async (client) => {
     const patients = await client.query(
@@ -40,6 +46,15 @@ router.get('/daily', requireAuth, requirePermission('reports.view'), async (req,
        WHERE created_at::date BETWEEN $1::date AND $2::date`,
       [startDate, endDate]
     );
+    const laboratory = await client.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE requested_at::date BETWEEN $1::date AND $2::date)::int AS requested,
+         (SELECT COUNT(*)::int FROM lab_result_versions WHERE released_at::date BETWEEN $1::date AND $2::date) AS released,
+         COUNT(*) FILTER (WHERE rejected_at::date BETWEEN $1::date AND $2::date AND status = 'rejected')::int AS rejected,
+         COUNT(*) FILTER (WHERE cancelled_at::date BETWEEN $1::date AND $2::date AND status = 'cancelled')::int AS cancelled
+       FROM lab_requests`,
+      [startDate, endDate]
+    );
 
     return {
       dateRange: { startDate, endDate },
@@ -48,7 +63,8 @@ router.get('/daily', requireAuth, requirePermission('reports.view'), async (req,
       diagnoses: diagnoses.rows[0].total,
       prescriptions: prescriptions.rows[0].total,
       medicinesDispensed: medicinesDispensed.rows[0].total,
-      stockActivity: stockActivity.rows[0].total
+      stockActivity: stockActivity.rows[0].total,
+      laboratory: laboratory.rows[0]
     };
   });
 
@@ -56,7 +72,9 @@ router.get('/daily', requireAuth, requirePermission('reports.view'), async (req,
 });
 
 router.get('/monthly', requireAuth, requirePermission('reports.view'), async (req, res) => {
-  const { startDate, endDate } = getDateWindow(req);
+  const dateWindow = getDateWindow(req);
+  if (!dateWindow) return res.status(400).json({ error: 'Provide a valid date range.' });
+  const { startDate, endDate } = dateWindow;
 
   const summary = await withTransaction(async (client) => {
     const totalPatients = await client.query(
@@ -92,6 +110,15 @@ router.get('/monthly', requireAuth, requirePermission('reports.view'), async (re
       [startDate, endDate]
     );
     const currentStock = await client.query('SELECT COALESCE(SUM(current_quantity), 0)::int AS total FROM medicines WHERE status = $1', ['active']);
+    const laboratory = await client.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE requested_at::date BETWEEN $1::date AND $2::date)::int AS requested,
+         (SELECT COUNT(*)::int FROM lab_result_versions WHERE released_at::date BETWEEN $1::date AND $2::date) AS released,
+         COUNT(*) FILTER (WHERE rejected_at::date BETWEEN $1::date AND $2::date AND status = 'rejected')::int AS rejected,
+         COUNT(*) FILTER (WHERE cancelled_at::date BETWEEN $1::date AND $2::date AND status = 'cancelled')::int AS cancelled
+       FROM lab_requests`,
+      [startDate, endDate]
+    );
 
     return {
       dateRange: { startDate, endDate },
@@ -103,7 +130,8 @@ router.get('/monthly', requireAuth, requirePermission('reports.view'), async (re
       medicinesDispensed: dispensed.rows[0].total,
       stockReceived: stockReceived.rows[0].total,
       stockIssued: stockIssued.rows[0].total,
-      currentStock: currentStock.rows[0].total
+      currentStock: currentStock.rows[0].total,
+      laboratory: laboratory.rows[0]
     };
   });
 

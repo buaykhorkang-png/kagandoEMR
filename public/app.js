@@ -8,8 +8,12 @@ const state = {
   clerkQueue: [],
   queue: [],
   medicines: [],
-  alerts: { lowStock: [], outOfStock: [], expiring: [] },
+  batches: [],
+  stockMovements: [],
+  alerts: { lowStock: [], outOfStock: [], expiring: [], expired: [] },
   laboratoryRequests: [],
+  laboratoryTests: [],
+  laboratoryReport: null,
   activeVisit: null,
   activeTriageVisit: null,
   users: [],
@@ -27,6 +31,7 @@ const state = {
   authNotice: '',
   adminRegistrationAvailable: false
 };
+const openStatusesForUi = ['pending', 'collected', 'received', 'processing', 'result_entered', 'verified', 'correction_pending', 'in_progress'];
 
 const roleNames = {
   clinician: 'Clinician',
@@ -98,6 +103,7 @@ function navItems() {
   if (state.user.permissions.includes('queue.clinical.view') && state.user.permissions.includes('dashboard.clinical')) items.push(['clinical', 'Q', 'Clinical queue']);
   if (state.user.permissions.includes('pharmacy.inventory') && state.user.permissions.includes('dashboard.pharmacy')) items.push(['pharmacy', 'Rx', 'Pharmacy']);
   if (state.user.permissions.includes('laboratory.requests.view') && state.user.permissions.includes('dashboard.laboratory')) items.push(['laboratory', 'Lab', 'Laboratory']);
+  if (state.user.permissions.includes('reports.view')) items.push(['laboratory-reports', 'LR', 'Laboratory reports']);
   if (state.user.permissions.includes('reports.view')) items.push(['reports', 'R', 'Reports']);
   if (state.user.permissions.includes('users.manage')) items.push(['users', 'U', 'Staff access']);
   if (state.user.permissions.includes('permissions.manage')) items.push(['permissions', 'Key', 'Roles & permissions']);
@@ -118,6 +124,7 @@ function permissionForView(view) {
     clinical: 'dashboard.clinical',
     pharmacy: 'dashboard.pharmacy',
     laboratory: 'dashboard.laboratory',
+    'laboratory-reports': 'reports.view',
     reports: 'reports.view',
     users: 'users.manage',
     permissions: 'permissions.manage',
@@ -244,7 +251,9 @@ function renderPatientForm() {
       <div class="field"><label for="new-gender">Gender</label><select id="new-gender" name="gender"><option value="">Not recorded</option><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></div>
       <div class="field"><label for="new-phone">Phone</label><input id="new-phone" name="phoneNumber" maxlength="30"></div>
       <div class="field"><label for="new-kin">Next of kin</label><input id="new-kin" name="nextOfKinName" maxlength="200"></div>
+      <div class="field"><label for="new-kin-relationship">Next of kin relationship</label><input id="new-kin-relationship" name="nextOfKinRelationship" maxlength="80" placeholder="Mother, spouse, guardian..."></div>
       <div class="field"><label for="new-kin-contact">Next of kin contact</label><input id="new-kin-contact" name="nextOfKinContact" maxlength="100"></div>
+      <div class="field"><label for="new-medical-history">Previous medical history</label><textarea id="new-medical-history" name="previousMedicalHistory" maxlength="12000" placeholder="Chronic illnesses, surgeries, allergies, or prior diagnoses"></textarea></div>
     </div>
     <div class="button-row"><button class="button" type="submit">Create patient</button><button class="button secondary" type="button" data-action="cancel-patient">Cancel</button></div>
     <p class="error-message" role="alert"></p>
@@ -277,7 +286,10 @@ function renderPatientDetail() {
       ['triage.create', 'consultation.start', 'diagnosis.create'].some((permission) => state.user.permissions.includes(permission))) {
     const history = (patient.visits || []).map((visit) => `<li>${escapeHtml(formatDate(visit.visit_date))} · ${escapeHtml(visit.status.replaceAll('_', ' '))}${visit.diagnosis ? ` · ${escapeHtml(visit.diagnosis)}` : ''}</li>`).join('');
     const prescriptions = (patient.prescriptions || []).map((rx) => `<li>${escapeHtml(rx.medication)} · ${escapeHtml(rx.dose)} · ${escapeHtml(rx.status)}</li>`).join('');
-    const labRequests = (patient.labRequests || []).map((request) => `<li>${escapeHtml(request.test_name)} · ${escapeHtml(request.status)}${request.result ? ` · ${escapeHtml(request.result)}` : ''}</li>`).join('');
+    const labRequests = (patient.labRequests || []).map((request) => `<li>${escapeHtml(request.request_number || request.test_name)} · Encounter #${escapeHtml(request.queue_number || '—')} · ${escapeHtml(request.status)}${request.result ? ` · ${escapeHtml(request.result)}${request.unit ? ` ${escapeHtml(request.unit)}` : ''}${request.reference_range ? ` · Reference: ${escapeHtml(request.reference_range)}` : ''}${request.comments ? ` · ${escapeHtml(request.comments)}` : ''}` : ''}${request.priority ? ` · ${escapeHtml(request.priority)}` : ''}
+      ${openStatusesForUi.includes(request.status) && request.requested_by === state.user.id && state.user.permissions.includes('laboratory.requests.cancel')
+        ? `<form class="inline-form" data-form="lab-cancel" data-id="${escapeHtml(request.id)}"><div class="field"><label>Cancellation reason</label><input name="reason" maxlength="1000" required></div><button class="button danger small" type="submit">Cancel laboratory request</button><p class="error-message" role="alert"></p></form>`
+        : ''}</li>`).join('');
     if (state.user.permissions.includes('diagnosis.create')) {
       controls = `<form class="inline-form" data-form="clinical">
         <h3>Clinical record</h3>
@@ -360,7 +372,11 @@ function renderDashboard() {
   let detail = '';
   let activeMetric = 'Operational overview';
 
-  if (state.user.role === 'clerk') {
+  if (state.view === 'laboratory-reports') {
+    title = 'Laboratory reports';
+    activeMetric = 'Laboratory workflow · Reports';
+    detail = laboratoryReports();
+  } else if (state.user.role === 'clerk') {
     title = 'Clerk dashboard';
     activeMetric = 'Front desk · Today';
     metrics = [
@@ -411,10 +427,12 @@ function renderDashboard() {
     metrics = [
       metric('L', 'Pending tests', stats.pendingLabRequests, 'Awaiting processing'),
       metric('T', 'In progress', stats.inProgressLabRequests, 'Currently being processed'),
-      metric('✓', 'Completed today', stats.completedLabRequests, 'Results entered today'),
-      metric('!', 'Urgent tests', stats.urgentLabRequests, 'From urgent / critical visits')
+      metric('✓', 'Released today', stats.completedLabRequests, 'Results available to clinicians'),
+      metric('R', 'Awaiting release', stats.awaitingRelease, 'Verified results'),
+      metric('×', 'Rejected today', stats.rejectedLabRequests, 'Specimen needs follow-up'),
+      metric('!', 'Urgent tests', stats.urgentLabRequests, 'Priority or urgent encounters')
     ];
-    detail = laboratoryQueue();
+    detail = state.view === 'laboratory-reports' ? laboratoryReports() : laboratoryQueue();
   } else if (state.user.role === 'management') {
     title = 'Management dashboard';
     metrics = [
@@ -623,13 +641,15 @@ function consultationWorkspace(visit) {
       <button class="button" type="submit">Complete consultation</button><p class="error-message" role="alert"></p></form>
     <div class="consultation-actions">
       <form class="inline-form" data-form="prescription" data-id="${escapeHtml(visit.id)}" data-patient="${escapeHtml(visit.patient_id)}"><h3>Prescription</h3>
-        <div class="detail-facts"><div class="field"><label>Medicine</label><input name="medication" maxlength="200" required></div><div class="field"><label>Dose</label><input name="dose" maxlength="200" required></div>
+        <div class="detail-facts"><div class="field"><label>Catalogue medicine</label><select name="medicineId" required><option value="">Select medicine</option>${state.medicines.map((medicine) => `<option value="${escapeHtml(medicine.id)}">${escapeHtml(medicine.name)} · ${escapeHtml(medicine.strength || '')} ${escapeHtml(medicine.dosage_form || '')}</option>`).join('')}</select></div><div class="field"><label>Dose</label><input name="dose" maxlength="200" required></div>
         <div class="field"><label>Frequency</label><input name="frequency" maxlength="100"></div><div class="field"><label>Duration</label><input name="duration" maxlength="100"></div>
         <div class="field"><label>Quantity</label><input name="quantity" type="number" min="1" required></div></div>
         <div class="field"><label>Instructions</label><textarea name="instructions" maxlength="2000"></textarea></div>
         <button class="button secondary" type="submit">Send prescription to pharmacy</button><p class="error-message" role="alert"></p></form>
       <form class="inline-form" data-form="lab-request" data-id="${escapeHtml(visit.id)}"><h3>Laboratory request</h3>
-        <div class="field"><label>Test</label><input name="testName" maxlength="200" required></div><div class="field"><label>Clinical notes</label><textarea name="clinicalNotes" maxlength="2000"></textarea></div>
+        <div class="field"><label>Configured test</label><select name="testId" required><option value="">Select test</option>${state.laboratoryTests.map((test) => `<option value="${escapeHtml(test.id)}">${escapeHtml(test.code)} · ${escapeHtml(test.name)} · Specimen: ${escapeHtml(test.specimen_requirements)}</option>`).join('')}</select></div>
+        <div class="detail-facts"><div class="field"><label>Priority</label><select name="priority"><option value="routine">Routine</option><option value="urgent">Urgent</option><option value="stat">STAT</option></select></div>
+        <div class="field"><label>Clinical indication</label><textarea name="clinicalIndication" maxlength="2000" required></textarea></div></div>
         <button class="button secondary" type="submit">Send to laboratory</button><p class="error-message" role="alert"></p></form>
       ${state.user.permissions.includes('appointments.followup.create') ? `<form class="inline-form" data-form="followup" data-patient="${escapeHtml(visit.patient_id)}"><h3>Schedule follow-up</h3>
         <div class="field"><label>Date and time</label><input name="scheduledAt" type="datetime-local" required></div>
@@ -641,60 +661,180 @@ function consultationWorkspace(visit) {
 
 function pharmacyDetail() {
   const alerts = state.alerts;
-  const medicines = state.medicines.map((medicine) => `<option value="${escapeHtml(medicine.id)}">${escapeHtml(medicine.name)} · ${escapeHtml(medicine.current_quantity)} ${escapeHtml(medicine.unit || 'units')}</option>`).join('');
+  const medicines = state.medicines.filter((medicine) => medicine.status === 'active')
+    .map((medicine) => `<option value="${escapeHtml(medicine.id)}">${escapeHtml(medicine.name)} · ${escapeHtml(medicine.strength || 'strength not recorded')} · ${escapeHtml(medicine.dosage_form || 'form not recorded')}</option>`).join('');
   const prescriptions = state.prescriptions.map((prescription) => `<article class="section-block">
     <div class="section-head"><h2>${escapeHtml(prescription.medication)} · ${escapeHtml(prescription.dose)}</h2><span class="badge">${escapeHtml(prescription.status.replaceAll('_', ' '))}</span></div>
     <p>${escapeHtml(prescription.last_name)}, ${escapeHtml(prescription.first_name)} · ${escapeHtml(prescription.medical_record_number)}</p>
-    <p>${escapeHtml(prescription.frequency || 'Frequency not recorded')} · ${escapeHtml(prescription.duration || 'Duration not recorded')} · Prescribed: ${escapeHtml(prescription.quantity)} · ${escapeHtml(prescription.instructions || '')}</p>
+    <p>Encounter ${escapeHtml(prescription.queue_number || '—')} · ${escapeHtml(prescription.frequency || 'Frequency not recorded')} · ${escapeHtml(prescription.duration || 'Duration not recorded')} · Prescribed: ${escapeHtml(prescription.quantity)} · Dispensed: ${escapeHtml(prescription.dispensed_quantity || 0)} · Remaining: ${escapeHtml(Math.max(0, Number(prescription.quantity || 0) - Number(prescription.dispensed_quantity || 0)))} · ${escapeHtml(prescription.instructions || '')}</p>
     ${['pending', 'active', 'partially_dispensed'].includes(prescription.status) ? `<form class="inline-form" data-form="dispense" data-id="${escapeHtml(prescription.id)}"><h3>Dispense medicine</h3><div class="detail-facts">
-      <div class="field"><label>Inventory medicine</label><select name="medicineId" required><option value="">Select medicine</option>${medicines}</select></div>
+      <div class="field"><label>Available stock batch</label><select name="batchId" required><option value="">Select batch</option>${state.batches.filter((batch) => {
+        const medicineName = String(prescription.medication || '').trim().toLowerCase();
+        const names = [batch.name, batch.generic_name].filter(Boolean).map((name) => name.trim().toLowerCase());
+        return names.includes(medicineName) && batch.status === 'active' && Number(batch.current_quantity) > 0 &&
+          (!batch.expires_at || batch.expires_at >= new Date().toISOString().slice(0, 10));
+      }).map((batch) => `<option value="${escapeHtml(batch.id)}">${escapeHtml(batch.name)} · ${escapeHtml(batch.strength || '')} ${escapeHtml(batch.dosage_form || '')} · Batch ${escapeHtml(batch.batch_number)} · Expires ${escapeHtml(batch.expires_at || 'not recorded')} · ${escapeHtml(batch.current_quantity)} ${escapeHtml(batch.unit || 'units')}</option>`).join('')}</select></div>
       <div class="field"><label>Quantity now (remaining ${escapeHtml(Math.max(0, Number(prescription.quantity || 0) - Number(prescription.dispensed_quantity || 0)))})</label><input name="quantity" type="number" min="1" max="${escapeHtml(Math.max(0, Number(prescription.quantity || 0) - Number(prescription.dispensed_quantity || 0)))}" required></div></div>
       <div class="field"><label>Pharmacy notes</label><textarea name="notes" maxlength="1000"></textarea></div>
       <button class="button" type="submit">Record dispensing</button><p class="error-message" role="alert"></p></form>` : ''}
     </article>`).join('');
-  const inventory = state.medicines.map((medicine) => `<tr><td>${escapeHtml(medicine.name)}</td><td>${escapeHtml(medicine.current_quantity)} ${escapeHtml(medicine.unit || '')}</td><td>${escapeHtml(medicine.minimum_stock_level)}</td><td>${escapeHtml(medicine.expiry_date || '—')}</td><td>${medicine.current_quantity === 0 ? 'Out of stock' : medicine.current_quantity <= medicine.minimum_stock_level ? 'Low stock' : 'Available'}</td></tr>`).join('');
+  const inventory = state.batches.map((batch) => `<tr><td>${escapeHtml(batch.name)} · ${escapeHtml(batch.strength || '')} · ${escapeHtml(batch.dosage_form || '')}</td><td>${escapeHtml(batch.batch_number)}</td><td>${escapeHtml(batch.quantity_received)}</td><td>${escapeHtml(batch.current_quantity)} ${escapeHtml(batch.unit || '')}</td><td>${escapeHtml(batch.expires_at || '—')}</td><td>${escapeHtml(batch.stock_location || '—')}</td><td>${escapeHtml(batch.availability.replaceAll('_', ' '))}</td></tr>`).join('');
+  const batchOptions = state.batches.map((batch) => `<option value="${escapeHtml(batch.id)}">${escapeHtml(batch.name)} · ${escapeHtml(batch.batch_number)} · ${escapeHtml(batch.current_quantity)} ${escapeHtml(batch.unit || 'units')}</option>`).join('');
+  const movements = state.stockMovements.map((movement) => `<tr><td>${escapeHtml(formatDate(movement.created_at))}</td><td>${escapeHtml(movement.movement_type.replaceAll('_', ' '))}</td><td>${escapeHtml(movement.name)} · ${escapeHtml(movement.batch_number || 'legacy stock')}</td><td>${escapeHtml(movement.quantity)} ${escapeHtml(movement.unit || '')}</td><td>${escapeHtml(movement.reference_code || movement.notes || '—')}</td><td>${escapeHtml(movement.received_or_dispensed_by || '—')}</td></tr>`).join('');
   return `<section class="section-block"><div class="section-head"><h2>Prescription queue</h2><span>${state.prescriptions.length} records</span></div>
     <label class="search-box"><input id="prescription-search" type="search" value="${escapeHtml(state.search)}" placeholder="Search patient or prescription"></label>
     ${prescriptions || '<p class="empty-state">No prescriptions available.</p>'}</section>
-    <section class="section-block spaced-section"><div class="section-head"><h2>Stock alerts</h2><span>${alerts.lowStock.length} low · ${alerts.outOfStock.length} out · ${alerts.expiring.length} expiring</span></div>
+    <section class="section-block spaced-section"><div class="section-head"><h2>Stock alerts</h2><span>${alerts.lowStock.length} low · ${alerts.outOfStock.length} out · ${alerts.expiring.length} expiring · ${alerts.expired.length} expired</span></div>
       <p>Expired/near-expiry stock is blocked by the dispensing transaction.</p>
-      <form class="inline-form" data-form="medicine-create"><h3>Add inventory medicine</h3>
-        <div class="detail-facts"><div class="field"><label>Name</label><input name="name" maxlength="200" required></div><div class="field"><label>Generic name</label><input name="genericName" maxlength="200"></div><div class="field"><label>Unit</label><input name="unit" maxlength="50"></div><div class="field"><label>Opening quantity</label><input name="quantity" type="number" min="0" value="0" required></div><div class="field"><label>Minimum stock</label><input name="minimumStockLevel" type="number" min="0" value="0" required></div><div class="field"><label>Expiry date</label><input name="expiryDate" type="date"></div></div>
-        <button class="button" type="submit">Add medicine</button><p class="error-message" role="alert"></p></form>
-      <div class="table-wrap"><table><thead><tr><th>Medicine</th><th>Available</th><th>Minimum</th><th>Expiry</th><th>Alert</th></tr></thead><tbody>${inventory || '<tr><td colspan="5" class="empty-state">No inventory medicines.</td></tr>'}</tbody></table></div>
+      <form class="inline-form" data-form="medicine-create"><h3>Add medicine to catalogue</h3>
+        <div class="detail-facts"><div class="field"><label>Name / brand</label><input name="name" maxlength="200" required></div><div class="field"><label>Generic name</label><input name="genericName" maxlength="200"></div><div class="field"><label>Strength</label><input name="strength" maxlength="100"></div><div class="field"><label>Dosage form</label><input name="dosageForm" maxlength="100"></div><div class="field"><label>Stock unit</label><input name="unit" maxlength="50" required></div><div class="field"><label>Category</label><input name="category" maxlength="100"></div><div class="field"><label>Minimum stock alert</label><input name="minimumStockLevel" type="number" min="0" step="1" value="0" required></div></div>
+        <p class="field-hint">Catalogue registration creates no stock. Use Receive Stock after saving.</p>
+        <button class="button" type="submit">Add to catalogue</button><p class="error-message" role="alert"></p></form>
+      <div class="table-wrap"><table><thead><tr><th>Medicine</th><th>Batch</th><th>Received</th><th>Available</th><th>Expiry</th><th>Location</th><th>Status</th></tr></thead><tbody>${inventory || '<tr><td colspan="7" class="empty-state">No stock batches.</td></tr>'}</tbody></table></div>
       <form class="inline-form" data-form="stock-receive"><h3>Receive stock</h3>
         <div class="detail-facts">
-          <div class="field"><label>Medicine in inventory</label><select name="medicineId" id="stock-medicine-select" required>
-            <option value="">Select an existing medicine</option>${medicines}<option value="new">+ Add a new medicine</option>
-          </select></div>
+          <div class="field"><label>Catalogue medicine</label><select name="medicineId" required><option value="">Select medicine</option>${medicines}</select></div>
           <div class="field"><label>Quantity received</label><input name="quantity" type="number" min="1" step="1" required></div>
-          <div class="field"><label>Receipt notes</label><input name="notes" maxlength="1000" placeholder="Supplier, invoice, or delivery details"></div>
+          <div class="field"><label>Batch / lot number</label><input name="batchNumber" maxlength="100" required></div>
+          <div class="field"><label>Manufacturing date</label><input name="manufacturedAt" type="date"></div>
+          <div class="field"><label>Expiry date</label><input name="expiresAt" type="date"></div>
+          <div class="field"><label>Supplier</label><input name="supplier" maxlength="200"></div>
+          <div class="field"><label>Delivery / purchase reference</label><input name="referenceCode" maxlength="120"></div>
+          <div class="field"><label>Date received</label><input name="receivedAt" type="date"></div>
+          <div class="field"><label>Stock location</label><input name="stockLocation" maxlength="120"></div>
+          <div class="field"><label>Receipt notes</label><input name="notes" maxlength="1000"></div>
         </div>
-        <div class="stock-new-medicine" id="stock-new-medicine-fields" hidden>
-          <h3>New medicine details</h3>
-          <p class="field-hint">This creates the inventory record and adds the received quantity in one transaction.</p>
-          <div class="detail-facts">
-            <div class="field"><label>Medicine name</label><input name="medicineName" maxlength="200" required disabled></div>
-            <div class="field"><label>Generic name</label><input name="genericName" maxlength="200" disabled></div>
-            <div class="field"><label>Strength</label><input name="strength" maxlength="100" placeholder="e.g. 500 mg" disabled></div>
-            <div class="field"><label>Dosage form</label><input name="dosageForm" maxlength="100" placeholder="e.g. tablet, syrup" disabled></div>
-            <div class="field"><label>Unit</label><input name="unit" maxlength="50" placeholder="e.g. tablets, bottles" disabled></div>
-            <div class="field"><label>Minimum stock alert</label><input name="minimumStockLevel" type="number" min="0" step="1" value="0" disabled></div>
-            <div class="field"><label>Expiry date</label><input name="expiryDate" type="date" disabled></div>
-            <div class="field"><label>Batch number</label><input name="batchNumber" maxlength="100" disabled></div>
-            <div class="field"><label>Supplier</label><input name="supplier" maxlength="200" disabled></div>
-          </div>
-        </div>
-        <button class="button secondary" type="submit">Receive stock</button><p class="error-message" role="alert"></p></form></section>`;
+        <button class="button secondary" type="submit">Receive stock</button><p class="error-message" role="alert"></p></form>
+    <form class="inline-form" data-form="stock-adjustment"><h3>Adjust stock with reason</h3>
+      <div class="detail-facts"><div class="field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option>${batchOptions}</select></div>
+      <div class="field"><label>Quantity change (+/-)</label><input name="quantity" type="number" step="1" required></div>
+      <div class="field"><label>Reason</label><input name="reason" maxlength="1000" required></div></div>
+      <button class="button secondary" type="submit">Record adjustment</button><p class="error-message" role="alert"></p></form>
+    <form class="inline-form" data-form="batch-status"><h3>Quarantine or release a batch</h3>
+      <div class="detail-facts"><div class="field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option>${batchOptions}</select></div>
+      <div class="field"><label>Status</label><select name="status" required><option value="quarantined">Quarantined</option><option value="active">Active</option></select></div>
+      <div class="field"><label>Reason</label><input name="reason" maxlength="1000" required></div></div>
+      <button class="button secondary" type="submit">Save batch status</button><p class="error-message" role="alert"></p></form>
+    <h3>Recent stock movements</h3><div class="table-wrap"><table><thead><tr><th>Date</th><th>Movement</th><th>Medicine / batch</th><th>Quantity</th><th>Reference / note</th><th>Staff</th></tr></thead><tbody>${movements || '<tr><td colspan="6" class="empty-state">No stock movements recorded.</td></tr>'}</tbody></table></div></section>`;
 }
 
 function laboratoryQueue() {
-  const rows = state.laboratoryRequests.map((request) => `<form class="section-block inline-form" data-form="lab-result" data-id="${escapeHtml(request.id)}">
-    <h2>${escapeHtml(request.test_name)} · ${escapeHtml(request.last_name)}, ${escapeHtml(request.first_name)}</h2>
-    <p>${escapeHtml(request.medical_record_number)} · Queue #${escapeHtml(request.queue_number || '—')} · ${escapeHtml(request.clinical_notes || '')}</p>
-    <div class="field"><label>Result</label><textarea name="result" maxlength="12000" required></textarea></div>
-    <button class="button" type="submit">Record result</button><p class="error-message" role="alert"></p></form>`).join('');
-  return `<section class="section-block"><div class="section-head"><h2>Pending laboratory requests</h2><span>${state.laboratoryRequests.length}</span></div>${rows || '<p class="empty-state">No laboratory requests pending.</p>'}</section>`;
+  const canManageCatalogue = state.user.permissions.includes('laboratory.catalogue.manage');
+  const catalogueForm = canManageCatalogue
+    ? `<section class="section-block"><h2>Test catalogue</h2>
+        <form class="inline-form" data-form="lab-catalogue">
+          <div class="detail-facts"><div class="field"><label>Test code</label><input name="code" maxlength="40" required></div>
+          <div class="field"><label>Display name</label><input name="name" maxlength="200" required></div>
+          <div class="field"><label>Result type</label><select name="resultType" required><option value="numeric">Numeric</option><option value="qualitative">Qualitative</option><option value="text">Text</option></select></div>
+          <div class="field"><label>Unit (if applicable)</label><input name="unit" maxlength="80"></div>
+          <div class="field"><label>Configured reference range (if applicable)</label><input name="referenceRange" maxlength="300"></div>
+          <div class="field"><label>Allowed qualitative values (one per line)</label><textarea name="allowedValues" maxlength="5000"></textarea></div></div>
+          <div class="field"><label>Specimen requirements</label><textarea name="specimenRequirements" maxlength="1000" required></textarea></div>
+          <button class="button secondary" type="submit">Add test definition</button><p class="error-message" role="alert"></p>
+        </form>
+        ${state.laboratoryTests.map((test) => `<form class="inline-form" data-form="lab-catalogue-update" data-id="${escapeHtml(test.id)}">
+          <h3>${escapeHtml(test.code)} · ${escapeHtml(test.name)}</h3>
+          <div class="detail-facts"><div class="field"><label>Test code</label><input name="code" maxlength="40" value="${escapeHtml(test.code)}" required></div>
+          <div class="field"><label>Display name</label><input name="name" maxlength="200" value="${escapeHtml(test.name)}" required></div>
+          <div class="field"><label>Result type</label><select name="resultType"><option value="numeric" ${test.result_type === 'numeric' ? 'selected' : ''}>Numeric</option><option value="qualitative" ${test.result_type === 'qualitative' ? 'selected' : ''}>Qualitative</option><option value="text" ${test.result_type === 'text' ? 'selected' : ''}>Text</option></select></div>
+          <div class="field"><label>Unit</label><input name="unit" maxlength="80" value="${escapeHtml(test.unit || '')}"></div>
+          <div class="field"><label>Configured reference range</label><input name="referenceRange" maxlength="300" value="${escapeHtml(test.reference_range || '')}"></div>
+          <div class="field"><label>Allowed qualitative values (one per line)</label><textarea name="allowedValues" maxlength="5000">${escapeHtml((test.allowed_values || []).join('\n'))}</textarea></div>
+          <div class="field"><label>Active</label><select name="isActive"><option value="true" ${test.is_active ? 'selected' : ''}>Yes</option><option value="false" ${!test.is_active ? 'selected' : ''}>No</option></select></div></div>
+          <div class="field"><label>Specimen requirements</label><textarea name="specimenRequirements" maxlength="1000" required>${escapeHtml(test.specimen_requirements)}</textarea></div>
+          <button class="button secondary" type="submit">Update test definition</button><p class="error-message" role="alert"></p>
+        </form>`).join('')}
+      </section>`
+    : '';
+
+  const cards = state.laboratoryRequests.map((request) => {
+    const status = request.status;
+    let actions = '';
+    if (status === 'pending' && !request.test_id && state.user.permissions.includes('laboratory.catalogue.manage')) {
+      actions += `<form class="inline-form" data-form="lab-configure" data-id="${escapeHtml(request.id)}"><h3>Map legacy request to configured test</h3>
+        <div class="field"><label>Test</label><select name="testId" required><option value="">Select test</option>${state.laboratoryTests.filter((test) => test.is_active).map((test) => `<option value="${escapeHtml(test.id)}">${escapeHtml(test.code)} · ${escapeHtml(test.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Mapping reason</label><input name="reason" maxlength="1000" required></div>
+        <button class="button secondary" type="submit">Map request</button><p class="error-message" role="alert"></p></form>`;
+    }
+
+    function laboratoryReports() {
+      const statusRows = (state.laboratoryReport && state.laboratoryReport.summary || []).map((row) =>
+        `<tr><td>${escapeHtml(row.status.replaceAll('_', ' '))}</td><td>${escapeHtml(row.priority)}</td><td>${escapeHtml(row.total)}</td></tr>`
+      ).join('');
+      const activityRows = (state.laboratoryReport && state.laboratoryReport.activity || []).map((row) =>
+        `<tr><td>${escapeHtml(row.request_day)}</td><td>${escapeHtml(row.requested)}</td><td>${escapeHtml(row.released)}</td><td>${escapeHtml(row.rejected)}</td><td>${escapeHtml(row.cancelled)}</td></tr>`
+      ).join('');
+      return `<section class="section-block"><div class="section-head"><h2>Laboratory operations</h2><span>Live database counts</span></div>
+        <h3>Requests by workflow status and priority</h3><div class="table-wrap"><table><thead><tr><th>Status</th><th>Priority</th><th>Requests</th></tr></thead><tbody>${statusRows || '<tr><td colspan="3" class="empty-state">No laboratory requests.</td></tr>'}</tbody></table></div>
+        <h3>Recent request activity by day</h3><div class="table-wrap"><table><thead><tr><th>Date</th><th>Requested</th><th>Released result versions</th><th>Rejected</th><th>Cancelled</th></tr></thead><tbody>${activityRows || '<tr><td colspan="5" class="empty-state">No recent laboratory activity.</td></tr>'}</tbody></table></div></section>`;
+    }
+    const specimenForm = (action, title) => `<form class="inline-form" data-form="lab-specimen" data-id="${escapeHtml(request.id)}">
+      <input type="hidden" name="action" value="${action}">
+      <h3>${title}</h3><div class="field"><label>Specimen identifier</label><input name="specimenIdentifier" maxlength="120" required></div>
+      <button class="button secondary" type="submit">${title}</button><p class="error-message" role="alert"></p></form>`;
+    const rejectForm = `<form class="inline-form" data-form="lab-specimen" data-id="${escapeHtml(request.id)}">
+      <input type="hidden" name="action" value="reject"><h3>Reject specimen</h3>
+      <div class="field"><label>Rejection reason</label><textarea name="reason" maxlength="1000" required></textarea></div>
+      <button class="button danger" type="submit">Reject specimen</button><p class="error-message" role="alert"></p></form>`;
+    if (state.user.permissions.includes('laboratory.specimens.manage')) {
+      if (status === 'pending') actions += specimenForm('collect', 'Record specimen collection') + specimenForm('receive', 'Record specimen receipt') + rejectForm;
+      if (status === 'collected') actions += specimenForm('receive', 'Record specimen receipt') + rejectForm;
+      if (status === 'received') {
+        actions += `<form class="inline-form" data-form="lab-process" data-id="${escapeHtml(request.id)}"><h3>Processing</h3><button class="button secondary" type="submit">Start processing</button><p class="error-message" role="alert"></p></form>${rejectForm}`;
+      }
+    }
+    if (['processing', 'in_progress'].includes(status) && state.user.permissions.includes('laboratory.results.enter')) {
+      const type = request.catalogue_result_type || 'text';
+      const valueField = type === 'numeric'
+        ? '<div class="field"><label>Numeric result</label><input name="value" type="number" step="any" required></div>'
+        : type === 'qualitative'
+          ? `<div class="field"><label>Qualitative result</label><select name="value" required><option value="">Select configured result</option>${(request.allowed_values || []).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}</select></div>`
+          : '<div class="field"><label>Result</label><textarea name="value" maxlength="12000" required></textarea></div>';
+      actions += `<form class="inline-form" data-form="lab-result" data-id="${escapeHtml(request.id)}" data-legacy="${status === 'in_progress' && !request.test_id}"><h3>Enter result${type === 'numeric' && request.catalogue_unit ? ` · ${escapeHtml(request.catalogue_unit)}` : ''}</h3>
+        ${valueField}${request.catalogue_reference_range ? `<p>Configured reference range: ${escapeHtml(request.catalogue_reference_range)}</p>` : ''}
+        <div class="field"><label>Comments</label><textarea name="comments" maxlength="2000"></textarea></div>
+        <button class="button" type="submit">Save result for independent review</button><p class="error-message" role="alert"></p></form>`;
+    }
+    if (['result_entered', 'correction_pending'].includes(status) && request.result_id && request.result_status === 'entered' &&
+        state.user.permissions.includes('laboratory.results.verify') && request.result_entered_by !== state.user.id) {
+      actions += `<form class="inline-form" data-form="lab-verify" data-id="${escapeHtml(request.id)}" data-result="${escapeHtml(request.result_id)}">
+        <h3>Independent result review</h3><p>${escapeHtml(request.numeric_value ?? request.qualitative_value ?? request.text_value ?? '—')} ${escapeHtml(request.result_unit || '')}</p>
+        <button class="button secondary" type="submit">Verify result</button><p class="error-message" role="alert"></p></form>`;
+    }
+    if (['verified', 'correction_pending'].includes(status) && request.result_id && request.result_status === 'verified' &&
+        state.user.permissions.includes('laboratory.results.release') && request.result_verified_by !== state.user.id &&
+        request.result_entered_by !== state.user.id) {
+      actions += `<form class="inline-form" data-form="lab-release" data-id="${escapeHtml(request.id)}" data-result="${escapeHtml(request.result_id)}">
+        <h3>Release verified result</h3><button class="button" type="submit">Release to clinician</button><p class="error-message" role="alert"></p></form>`;
+    }
+    if (['released', 'corrected', 'completed'].includes(status) && state.user.permissions.includes('laboratory.results.amend')) {
+      const type = request.result_type || 'text';
+      const valueField = type === 'numeric'
+        ? '<div class="field"><label>Corrected numeric result</label><input name="value" type="number" step="any" required></div>'
+        : type === 'qualitative'
+          ? `<div class="field"><label>Corrected qualitative result</label><select name="value" required><option value="">Select configured result</option>${(request.allowed_values || []).map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}</select></div>`
+          : '<div class="field"><label>Corrected result</label><textarea name="value" maxlength="12000" required></textarea></div>';
+      actions += `<form class="inline-form" data-form="lab-result" data-id="${escapeHtml(request.id)}"><h3>Amend released result · version ${escapeHtml(request.result_version || 1)}</h3>
+        <div class="field"><label>Correction reason</label><textarea name="amendmentReason" maxlength="1000" required></textarea></div>
+        ${valueField}<div class="field"><label>Comments</label><textarea name="comments" maxlength="2000"></textarea></div>
+        <button class="button secondary" type="submit">Save correction for independent review</button><p class="error-message" role="alert"></p></form>`;
+    }
+    if (openStatusesForUi.includes(status) && state.user.permissions.includes('laboratory.requests.cancel')) {
+      actions += `<form class="inline-form" data-form="lab-cancel" data-id="${escapeHtml(request.id)}"><h3>Cancel request</h3>
+        <div class="field"><label>Cancellation reason</label><textarea name="reason" maxlength="1000" required></textarea></div>
+        <button class="button danger" type="submit">Cancel request</button><p class="error-message" role="alert"></p></form>`;
+    }
+    const value = request.numeric_value ?? request.qualitative_value ?? request.text_value;
+    return `<article class="section-block">
+      <div class="section-head"><h2>${escapeHtml(request.request_number)} · ${escapeHtml(request.test_name)}</h2><span class="badge">${escapeHtml(status.replaceAll('_', ' '))}</span></div>
+      <p><strong>${escapeHtml(request.last_name)}, ${escapeHtml(request.first_name)}</strong> · ${escapeHtml(request.medical_record_number)} · Encounter #${escapeHtml(request.queue_number || '—')} · ${escapeHtml(request.priority.toUpperCase())}</p>
+      <p>Specimen: ${escapeHtml(request.specimen_requirements || 'Not specified')}${request.specimen_identifier ? ` · Identifier ${escapeHtml(request.specimen_identifier)}` : ''}</p>
+      <p>Indication: ${escapeHtml(request.clinical_indication || request.clinical_notes || 'Not recorded')}${request.rejection_reason ? ` · Rejection: ${escapeHtml(request.rejection_reason)}` : ''}</p>
+      ${request.result_id ? `<p>Version ${escapeHtml(request.result_version)} · ${escapeHtml(request.result_status)}${value !== null && value !== undefined ? ` · ${escapeHtml(value)} ${escapeHtml(request.result_unit || '')}` : ''}${request.result_reference_range ? ` · Reference: ${escapeHtml(request.result_reference_range)}` : ''}</p>
+        <details><summary>Result version history</summary><ol>${(request.result_history || []).map((version) => `<li>Version ${escapeHtml(version.versionNumber)} · ${escapeHtml(version.status)} · ${escapeHtml(version.numericValue ?? version.qualitativeValue ?? version.textValue ?? '—')} ${escapeHtml(version.unit || '')}${version.amendmentReason ? ` · Correction: ${escapeHtml(version.amendmentReason)}` : ''}${version.comments ? ` · ${escapeHtml(version.comments)}` : ''}</li>`).join('')}</ol></details>` : ''}
+      ${actions}</article>`;
+  }).join('');
+  return `${catalogueForm}<section class="section-block"><div class="section-head"><h2>Laboratory worklist</h2><span>${state.laboratoryRequests.length} requests</span></div>${cards || '<p class="empty-state">No laboratory requests found.</p>'}</section>`;
 }
 
 function renderPatients() {
@@ -890,18 +1030,27 @@ async function loadClinicalQueue() {
 }
 
 async function loadPharmacyData() {
-  const [prescriptions, medicines, alerts] = await Promise.all([
+  const [prescriptions, medicines, batches, alerts, stockHistory] = await Promise.all([
     api(`/api/prescriptions?search=${encodeURIComponent(state.search)}`),
     api('/api/pharmacy/medicines'),
-    api('/api/pharmacy/alerts')
+    api('/api/pharmacy/batches'),
+    api('/api/pharmacy/alerts'),
+    api('/api/pharmacy/stock-movements?limit=20')
   ]);
   state.prescriptions = prescriptions.prescriptions;
   state.medicines = medicines.medicines;
+  state.batches = batches.batches;
   state.alerts = alerts;
+  state.stockMovements = stockHistory.movements;
 }
 
 async function loadLaboratoryQueue() {
-  state.laboratoryRequests = (await api('/api/workflow/laboratory')).requests;
+  const [requests, catalogue] = await Promise.all([
+    api('/api/laboratory/requests'),
+    api('/api/laboratory/catalogue')
+  ]);
+  state.laboratoryRequests = requests.requests;
+  state.laboratoryTests = catalogue.tests;
 }
 
 async function loadUsers() {
@@ -963,7 +1112,16 @@ async function loadDashboard() {
     state.queue = (await api('/api/workflow/queue')).visits;
   }
   if (state.user.permissions.includes('pharmacy.inventory')) await loadPharmacyData();
+  else if (state.user.permissions.includes('prescriptions.create')) {
+    state.medicines = (await api('/api/pharmacy/catalogue')).medicines;
+  }
+  if (state.user.permissions.includes('laboratory.requests.create')) {
+    state.laboratoryTests = (await api('/api/laboratory/catalogue')).tests;
+  }
   if (state.user.permissions.includes('laboratory.requests.view')) await loadLaboratoryQueue();
+  if (state.view === 'laboratory-reports' && state.user.permissions.includes('reports.view')) {
+    state.laboratoryReport = await api('/api/laboratory/reports');
+  }
   renderDashboard();
 }
 
@@ -987,7 +1145,7 @@ async function navigate(view) {
   state.error = '';
   render();
   try {
-    if (['dashboard', 'appointments', 'clinical', 'laboratory', 'vitals'].includes(view)) await loadDashboard();
+    if (['dashboard', 'appointments', 'clinical', 'laboratory', 'laboratory-reports', 'vitals'].includes(view)) await loadDashboard();
     if (['patients', 'registration', 'checkin'].includes(view)) await loadPatients();
     if (view === 'pharmacy') {
       if (state.user.permissions.includes('pharmacy.inventory')) {
@@ -1137,11 +1295,73 @@ async function handleSubmit(event) {
       else renderDashboard();
       toast('Prescription sent to pharmacy.');
     } else if (form.dataset.form === 'lab-request') {
-      await api(`/api/workflow/visits/${encodeURIComponent(form.dataset.id)}/lab-requests`, { method: 'POST', body: JSON.stringify(values) });
+      await api(`/api/laboratory/visits/${encodeURIComponent(form.dataset.id)}/requests`, { method: 'POST', body: JSON.stringify(values) });
       await loadClinicalQueue();
       if (state.view === 'dashboard') await loadDashboard();
       else renderDashboard();
       toast('Laboratory request sent.');
+    } else if (form.dataset.form === 'lab-catalogue' || form.dataset.form === 'lab-catalogue-update') {
+      values.allowedValues = values.allowedValues.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+      if (form.dataset.form === 'lab-catalogue-update') {
+        values.isActive = values.isActive === 'true';
+        await api(`/api/laboratory/catalogue/${encodeURIComponent(form.dataset.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify(values)
+        });
+      } else {
+        await api('/api/laboratory/catalogue', { method: 'POST', body: JSON.stringify(values) });
+      }
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast('Laboratory test catalogue saved.');
+    } else if (form.dataset.form === 'lab-configure') {
+      await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/configure`, {
+        method: 'PATCH',
+        body: JSON.stringify(values)
+      });
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast('Legacy laboratory request mapped to the configured test.');
+    } else if (form.dataset.form === 'lab-specimen') {
+      await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/specimen`, {
+        method: 'PATCH',
+        body: JSON.stringify(values)
+      });
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast('Specimen status saved.');
+    } else if (form.dataset.form === 'lab-process') {
+      await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/process`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast('Specimen processing started.');
+    } else if (form.dataset.form === 'lab-verify' || form.dataset.form === 'lab-release') {
+      const transition = form.dataset.form === 'lab-verify' ? 'verify' : 'release';
+      await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/results/${encodeURIComponent(form.dataset.result)}/${transition}`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast(transition === 'verify' ? 'Result verified.' : 'Result released to the clinician.');
+    } else if (form.dataset.form === 'lab-cancel') {
+      await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/cancel`, {
+        method: 'PATCH',
+        body: JSON.stringify(values)
+      });
+      if (state.activePatient) {
+        await openPatient(state.activePatient.id);
+      } else {
+        await loadLaboratoryQueue();
+        renderDashboard();
+      }
+      toast('Laboratory request cancelled.');
+    } else if (form.dataset.form === 'lab-report-refresh') {
+      state.laboratoryReport = await api('/api/laboratory/reports');
+      renderDashboard();
     } else if (form.dataset.form === 'dispense') {
       values.prescriptionId = form.dataset.id;
       await api('/api/pharmacy/dispense', { method: 'POST', body: JSON.stringify(values) });
@@ -1150,13 +1370,12 @@ async function handleSubmit(event) {
       else renderPrescriptions();
       toast('Dispensing recorded and stock updated.');
     } else if (form.dataset.form === 'medicine-create') {
-      values.quantity = Number(values.quantity);
       values.minimumStockLevel = Number(values.minimumStockLevel);
       await api('/api/pharmacy/medicines', { method: 'POST', body: JSON.stringify(values) });
       await loadPharmacyData();
       if (state.view === 'dashboard') await loadDashboard();
       else renderPrescriptions();
-      toast('Medicine added to inventory.');
+      toast('Medicine added to catalogue. Receive stock separately.');
     } else if (form.dataset.form === 'stock-receive') {
       values.quantity = Number(values.quantity);
       const received = await api('/api/pharmacy/stock-receive', { method: 'POST', body: JSON.stringify(values) });
@@ -1164,12 +1383,38 @@ async function handleSubmit(event) {
       if (state.view === 'dashboard') await loadDashboard();
       else renderPrescriptions();
       toast(`${received.medicine.name}: ${received.medicine.current_quantity} ${received.medicine.unit || 'units'} in stock.`);
-    } else if (form.dataset.form === 'lab-result') {
-      await api(`/api/workflow/laboratory/${encodeURIComponent(form.dataset.id)}`, { method: 'PATCH', body: JSON.stringify(values) });
-      await loadLaboratoryQueue();
+    } else if (form.dataset.form === 'stock-adjustment') {
+      values.quantity = Number(values.quantity);
+      await api('/api/pharmacy/stock-adjustments', { method: 'POST', body: JSON.stringify(values) });
+      await loadPharmacyData();
       if (state.view === 'dashboard') await loadDashboard();
-      else renderDashboard();
-      toast('Laboratory result recorded and linked to the visit.');
+      else renderPrescriptions();
+      toast('Stock adjustment recorded with its reason.');
+    } else if (form.dataset.form === 'batch-status') {
+      const { batchId, ...body } = values;
+      await api(`/api/pharmacy/batches/${encodeURIComponent(batchId)}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify(body)
+      });
+      await loadPharmacyData();
+      if (state.view === 'dashboard') await loadDashboard();
+      else renderPrescriptions();
+      toast('Batch status updated and audited.');
+    } else if (form.dataset.form === 'lab-result') {
+      if (form.dataset.legacy === 'true') {
+        await api(`/api/workflow/laboratory/${encodeURIComponent(form.dataset.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ result: values.value, comments: values.comments })
+        });
+      } else {
+        await api(`/api/laboratory/requests/${encodeURIComponent(form.dataset.id)}/results`, {
+          method: 'POST',
+          body: JSON.stringify(values)
+        });
+      }
+      await loadLaboratoryQueue();
+      renderDashboard();
+      toast('Result saved for independent verification.');
     }
   } catch (error) {
     if (['login', 'registration', 'password-change'].includes(form.dataset.form)) state.error = error.message;
@@ -1275,7 +1520,7 @@ document.addEventListener('click', async (event) => {
     if (action === 'new-prescription') {
       const panel = document.querySelector('.detail-panel');
       if (panel && !panel.querySelector('[data-form="prescription"]')) {
-        panel.insertAdjacentHTML('beforeend', `<form class="inline-form" data-form="prescription"><h3>New prescription</h3><div class="field"><label for="medication">Medication</label><input id="medication" name="medication" maxlength="200" required></div><div class="field"><label for="dose">Dose</label><input id="dose" name="dose" maxlength="200" required></div><div class="detail-facts"><div class="field"><label for="frequency">Frequency</label><input id="frequency" name="frequency" maxlength="100"></div><div class="field"><label for="duration">Duration</label><input id="duration" name="duration" maxlength="100"></div><div class="field"><label for="quantity">Quantity</label><input id="quantity" name="quantity" type="number" min="1" required></div></div><div class="field"><label for="instructions">Instructions</label><textarea id="instructions" name="instructions" maxlength="2000"></textarea></div><button class="button" type="submit">Create prescription</button><p class="error-message" role="alert"></p></form>`);
+        panel.insertAdjacentHTML('beforeend', `<form class="inline-form" data-form="prescription"><h3>New prescription</h3><div class="field"><label for="medication">Catalogue medicine</label><select id="medication" name="medicineId" required><option value="">Select medicine</option>${state.medicines.map((medicine) => `<option value="${escapeHtml(medicine.id)}">${escapeHtml(medicine.name)} · ${escapeHtml(medicine.strength || '')} ${escapeHtml(medicine.dosage_form || '')}</option>`).join('')}</select></div><div class="field"><label for="dose">Dose</label><input id="dose" name="dose" maxlength="200" required></div><div class="detail-facts"><div class="field"><label for="frequency">Frequency</label><input id="frequency" name="frequency" maxlength="100"></div><div class="field"><label for="duration">Duration</label><input id="duration" name="duration" maxlength="100"></div><div class="field"><label for="quantity">Quantity</label><input id="quantity" name="quantity" type="number" min="1" required></div></div><div class="field"><label for="instructions">Instructions</label><textarea id="instructions" name="instructions" maxlength="2000"></textarea></div><button class="button" type="submit">Create prescription</button><p class="error-message" role="alert"></p></form>`);
       }
     }
     if (action === 'archive-patient' && window.confirm('Archive this patient? The record will be retained and removed from routine search.')) {
@@ -1335,16 +1580,6 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('change', (event) => {
-  if (event.target.id === 'stock-medicine-select') {
-    const fields = document.querySelector('#stock-new-medicine-fields');
-    if (!fields) return;
-    const isNewMedicine = event.target.value === 'new';
-    fields.hidden = !isNewMedicine;
-    fields.querySelectorAll('input').forEach((input) => {
-      input.disabled = !isNewMedicine;
-    });
-    return;
-  }
   if (event.target.id !== 'register-role') return;
   const isInitialAdmin = event.target.value === 'administrator';
   const password = document.querySelector('#register-password');

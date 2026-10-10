@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS patients (
   address TEXT,
   next_of_kin_name VARCHAR(200),
   next_of_kin_contact VARCHAR(100),
+  next_of_kin_relationship VARCHAR(80),
+  previous_medical_history TEXT,
   registration_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   diagnoses TEXT,
   treatment_notes TEXT,
@@ -59,6 +61,8 @@ ALTER TABLE patients ADD COLUMN IF NOT EXISTS phone_number VARCHAR(30);
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS address TEXT;
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS next_of_kin_name VARCHAR(200);
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS next_of_kin_contact VARCHAR(100);
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS next_of_kin_relationship VARCHAR(80);
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS previous_medical_history TEXT;
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS registration_date TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS allergies TEXT;
 
@@ -202,6 +206,32 @@ CREATE TABLE IF NOT EXISTS medicines (
 ALTER TABLE medicines DROP CONSTRAINT IF EXISTS medicines_stock_nonnegative_check;
 ALTER TABLE medicines ADD CONSTRAINT medicines_stock_nonnegative_check CHECK (current_quantity >= 0 AND minimum_stock_level >= 0);
 
+CREATE TABLE IF NOT EXISTS medicine_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE CASCADE,
+  batch_number VARCHAR(100) NOT NULL,
+  manufactured_at DATE,
+  expires_at DATE,
+  quantity_received INTEGER NOT NULL CHECK (quantity_received > 0),
+  current_quantity INTEGER NOT NULL CHECK (current_quantity >= 0),
+  supplier VARCHAR(200),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  received_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  stock_location VARCHAR(120),
+  status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'quarantined', 'expired')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (medicine_id, batch_number),
+  CHECK (manufactured_at IS NULL OR expires_at IS NULL OR manufactured_at <= expires_at)
+);
+CREATE INDEX IF NOT EXISTS medicine_batches_medicine_expiry_idx
+  ON medicine_batches(medicine_id, expires_at, received_at);
+CREATE INDEX IF NOT EXISTS medicine_batches_expiry_idx
+  ON medicine_batches(expires_at) WHERE status = 'active';
+
+ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS medicine_id UUID REFERENCES medicines(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS prescriptions_medicine_id_idx ON prescriptions(medicine_id);
+
 CREATE TABLE IF NOT EXISTS stock_movements (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE CASCADE,
@@ -233,19 +263,167 @@ ALTER TABLE dispensing ADD CONSTRAINT dispensing_quantity_positive_check CHECK (
 
 CREATE INDEX IF NOT EXISTS dispensing_prescription_idx ON dispensing(prescription_id, dispensed_at DESC);
 
+ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES medicine_batches(id) ON DELETE SET NULL;
+ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS reference_code VARCHAR(120);
+ALTER TABLE dispensing ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES medicine_batches(id) ON DELETE SET NULL;
+
+INSERT INTO medicine_batches (medicine_id, batch_number, expires_at, quantity_received, current_quantity, supplier, received_at, status)
+SELECT m.id, COALESCE(NULLIF(BTRIM(m.batch_number), ''), 'LEGACY-' || LEFT(REPLACE(m.id::text, '-', ''), 16)),
+       m.expiry_date, m.current_quantity, m.current_quantity, m.supplier, m.date_added,
+       CASE WHEN m.expiry_date < CURRENT_DATE THEN 'expired' ELSE 'active' END
+FROM medicines m
+WHERE m.current_quantity > 0
+  AND NOT EXISTS (SELECT 1 FROM medicine_batches b WHERE b.medicine_id = m.id);
+
+CREATE TABLE IF NOT EXISTS lab_test_catalogue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code VARCHAR(40) NOT NULL UNIQUE,
+  name VARCHAR(200) NOT NULL,
+  result_type TEXT NOT NULL CHECK (result_type IN ('numeric', 'qualitative', 'text')),
+  unit VARCHAR(80),
+  reference_range TEXT,
+  allowed_values TEXT[] NOT NULL DEFAULT '{}',
+  specimen_requirements TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (result_type = 'qualitative' OR cardinality(allowed_values) = 0)
+);
+
 CREATE TABLE IF NOT EXISTS lab_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   visit_id UUID NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
   patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   requested_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  test_id UUID REFERENCES lab_test_catalogue(id) ON DELETE SET NULL,
+  test_result_type TEXT CHECK (test_result_type IS NULL OR test_result_type IN ('numeric', 'qualitative', 'text')),
+  test_unit VARCHAR(80),
+  test_reference_range TEXT,
+  test_allowed_values TEXT[] NOT NULL DEFAULT '{}',
   test_name VARCHAR(200) NOT NULL,
   clinical_notes TEXT,
+  clinical_indication TEXT,
+  specimen_requirements TEXT,
+  request_number VARCHAR(40),
+  priority TEXT NOT NULL DEFAULT 'routine',
+  specimen_identifier VARCHAR(120),
+  collected_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  collected_at TIMESTAMPTZ,
+  received_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  received_at TIMESTAMPTZ,
+  rejection_reason TEXT,
+  rejected_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  rejected_at TIMESTAMPTZ,
+  processing_started_at TIMESTAMPTZ,
+  cancelled_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  cancelled_at TIMESTAMPTZ,
+  cancellation_reason TEXT,
   result TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+  status TEXT NOT NULL DEFAULT 'pending',
   requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_by UUID REFERENCES users(id) ON DELETE SET NULL,
   completed_at TIMESTAMPTZ
 );
+
+CREATE SEQUENCE IF NOT EXISTS lab_request_number_seq;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS test_id UUID REFERENCES lab_test_catalogue(id) ON DELETE SET NULL;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS test_result_type TEXT;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS test_unit VARCHAR(80);
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS test_reference_range TEXT;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS test_allowed_values TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS clinical_indication TEXT;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS specimen_requirements TEXT;
+ALTER TABLE lab_requests DROP CONSTRAINT IF EXISTS lab_requests_test_result_type_check;
+ALTER TABLE lab_requests ADD CONSTRAINT lab_requests_test_result_type_check
+  CHECK (test_result_type IS NULL OR test_result_type IN ('numeric', 'qualitative', 'text'));
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS request_number VARCHAR(40);
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'routine';
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS specimen_identifier VARCHAR(120);
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS collected_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS collected_at TIMESTAMPTZ;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS received_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS rejected_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS cancelled_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+ALTER TABLE lab_requests ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+UPDATE lab_requests SET clinical_indication = clinical_notes WHERE clinical_indication IS NULL;
+UPDATE lab_requests
+SET request_number = 'LAB-' || TO_CHAR(requested_at AT TIME ZONE 'UTC', 'YYYYMMDD') || '-' ||
+  LPAD(NEXTVAL('lab_request_number_seq')::text, 8, '0')
+WHERE request_number IS NULL;
+ALTER TABLE lab_requests ALTER COLUMN request_number SET NOT NULL;
+ALTER TABLE lab_requests DROP CONSTRAINT IF EXISTS lab_requests_status_check;
+ALTER TABLE lab_requests ADD CONSTRAINT lab_requests_status_check CHECK (
+  status IN ('pending', 'collected', 'received', 'processing', 'result_entered', 'verified',
+    'correction_pending', 'released', 'corrected', 'rejected', 'cancelled', 'in_progress', 'completed')
+);
+ALTER TABLE lab_requests DROP CONSTRAINT IF EXISTS lab_requests_priority_check;
+ALTER TABLE lab_requests ADD CONSTRAINT lab_requests_priority_check CHECK (priority IN ('routine', 'urgent', 'stat'));
+CREATE UNIQUE INDEX IF NOT EXISTS lab_requests_request_number_uidx ON lab_requests(request_number);
+CREATE INDEX IF NOT EXISTS lab_requests_status_date_idx ON lab_requests(status, requested_at DESC);
+CREATE INDEX IF NOT EXISTS lab_requests_patient_idx ON lab_requests(patient_id, requested_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS lab_requests_active_visit_test_uidx
+  ON lab_requests(visit_id, test_id)
+  WHERE test_id IS NOT NULL AND status IN ('pending', 'collected', 'received', 'processing', 'result_entered', 'verified', 'correction_pending');
+
+CREATE TABLE IF NOT EXISTS lab_result_versions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id UUID NOT NULL REFERENCES lab_requests(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL CHECK (version_number > 0),
+  result_type TEXT NOT NULL CHECK (result_type IN ('numeric', 'qualitative', 'text')),
+  numeric_value NUMERIC(18,6),
+  qualitative_value TEXT,
+  text_value TEXT,
+  unit VARCHAR(80),
+  reference_range TEXT,
+  comments TEXT,
+  status TEXT NOT NULL DEFAULT 'entered' CHECK (status IN ('entered', 'verified', 'released', 'superseded')),
+  entered_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  entered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  verified_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  verified_at TIMESTAMPTZ,
+  released_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  released_at TIMESTAMPTZ,
+  amendment_reason TEXT,
+  supersedes_result_id UUID REFERENCES lab_result_versions(id) ON DELETE SET NULL,
+  UNIQUE (request_id, version_number),
+  CHECK (
+    (result_type = 'numeric' AND numeric_value IS NOT NULL AND qualitative_value IS NULL AND text_value IS NULL) OR
+    (result_type = 'qualitative' AND numeric_value IS NULL AND qualitative_value IS NOT NULL AND text_value IS NULL) OR
+    (result_type = 'text' AND numeric_value IS NULL AND qualitative_value IS NULL AND text_value IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS lab_result_versions_request_idx ON lab_result_versions(request_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS lab_result_versions_release_idx ON lab_result_versions(request_id, released_at DESC)
+  WHERE released_at IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS lab_result_versions_one_verified_uidx
+  ON lab_result_versions(request_id) WHERE status = 'verified';
+
+CREATE UNIQUE INDEX IF NOT EXISTS visits_id_patient_id_uidx ON visits(id, patient_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lab_requests_visit_patient_fk') THEN
+    ALTER TABLE lab_requests ADD CONSTRAINT lab_requests_visit_patient_fk
+      FOREIGN KEY (visit_id, patient_id) REFERENCES visits(id, patient_id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END;
+$$;
+ALTER TABLE lab_requests VALIDATE CONSTRAINT lab_requests_visit_patient_fk;
+
+INSERT INTO lab_result_versions (
+  request_id, version_number, result_type, text_value, status, entered_by, entered_at, released_by, released_at
+)
+SELECT lr.id, 1, 'text', lr.result, 'released', lr.completed_by, COALESCE(lr.completed_at, lr.requested_at),
+       lr.completed_by, COALESCE(lr.completed_at, lr.requested_at)
+FROM lab_requests lr
+WHERE lr.status = 'completed' AND NULLIF(BTRIM(lr.result), '') IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM lab_result_versions rv WHERE rv.request_id = lr.id);
 CREATE INDEX IF NOT EXISTS lab_requests_status_date_idx ON lab_requests(status, requested_at DESC);
 CREATE INDEX IF NOT EXISTS lab_requests_patient_idx ON lab_requests(patient_id, requested_at DESC);
 
@@ -367,6 +545,13 @@ INSERT INTO permissions (name, description) VALUES
   ('laboratory.requests.view', 'View and process laboratory requests.'),
   ('laboratory.requests.create', 'Request laboratory investigations.'),
   ('laboratory.results', 'Record laboratory results and test status.'),
+  ('laboratory.catalogue.manage', 'Create, configure, and deactivate laboratory test definitions.'),
+  ('laboratory.specimens.manage', 'Record specimen collection, receipt, rejection, and processing.'),
+  ('laboratory.results.enter', 'Enter laboratory results.'),
+  ('laboratory.results.verify', 'Independently verify laboratory results.'),
+  ('laboratory.results.release', 'Release verified laboratory results to the clinician.'),
+  ('laboratory.results.amend', 'Create traceable corrections to released laboratory results.'),
+  ('laboratory.requests.cancel', 'Cancel open laboratory requests with a reason.'),
   ('prescriptions.view', 'View prescriptions required for patient care or dispensing.'),
   ('prescriptions.create', 'Create clinical prescriptions.'),
   ('pharmacy.inventory', 'View and manage medicine inventory and stock.'),
@@ -390,12 +575,16 @@ INSERT INTO role_permissions (role, permission_name) VALUES
   ('clinician', 'dashboard.view'), ('clinician', 'dashboard.clinical'), ('clinician', 'patients.view'),
   ('clinician', 'appointments.relevant.view'), ('clinician', 'appointments.followup.create'),
   ('clinician', 'queue.clinical.view'), ('clinician', 'consultation.start'), ('clinician', 'consultation.complete'),
-  ('clinician', 'diagnosis.create'), ('clinician', 'laboratory.requests.create'),
+  ('clinician', 'diagnosis.create'), ('clinician', 'laboratory.requests.create'), ('clinician', 'laboratory.requests.cancel'),
   ('clinician', 'prescriptions.view'), ('clinician', 'prescriptions.create'),
   ('pharmacist', 'dashboard.view'), ('pharmacist', 'dashboard.pharmacy'),
   ('pharmacist', 'prescriptions.view'), ('pharmacist', 'pharmacy.inventory'), ('pharmacist', 'pharmacy.dispense'),
   ('laboratory', 'dashboard.view'), ('laboratory', 'dashboard.laboratory'),
   ('laboratory', 'laboratory.requests.view'), ('laboratory', 'laboratory.results'),
+  ('laboratory', 'laboratory.catalogue.manage'), ('laboratory', 'laboratory.specimens.manage'),
+  ('laboratory', 'laboratory.results.enter'), ('laboratory', 'laboratory.results.verify'),
+  ('laboratory', 'laboratory.results.release'), ('laboratory', 'laboratory.results.amend'),
+  ('laboratory', 'laboratory.requests.cancel'),
   ('management', 'dashboard.view'), ('management', 'dashboard.management'),
   ('management', 'reports.view'),
   ('administrator', 'dashboard.view'), ('administrator', 'dashboard.administration'),

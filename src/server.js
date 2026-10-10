@@ -16,6 +16,7 @@ const pharmacyRoutes = require('./routes/pharmacy');
 const dashboardRoutes = require('./routes/dashboard');
 const reportsRoutes = require('./routes/reports');
 const workflowRoutes = require('./routes/workflow');
+const laboratoryRoutes = require('./routes/laboratory');
 const { requireAuth, requirePermission } = require('./middleware/auth');
 
 if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
@@ -85,6 +86,8 @@ app.use('/api/pharmacy', pharmacyRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/workflow', workflowRoutes);
+app.use('/api/laboratory', laboratoryRoutes);
+app.use('/api/workflow', laboratoryRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -96,6 +99,14 @@ app.use((error, req, res, next) => {
   const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
     ? error.statusCode
     : error.type === 'entity.parse.failed' ? 400 : 500;
+  if (status === 500) {
+    console.error('Unhandled request error.', {
+      requestId: res.getHeader('X-Request-Id'),
+      method: req.method,
+      errorType: error.name,
+      code: error.code
+    });
+  }
   const message = status === 500
     ? 'Internal server error.'
     : error.type === 'entity.parse.failed' ? 'Invalid request body.' : error.message;
