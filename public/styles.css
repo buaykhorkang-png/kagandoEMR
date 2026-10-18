@@ -141,6 +141,15 @@ td strong { color: var(--ink); font-size: 13px; }
 .stock-new-medicine .field-hint { margin: 0; }
 .stock-new-medicine .detail-facts { padding: 0; background: transparent; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(15, 35, 50, .58); }
+.form-modal { width: min(760px, 100%); max-height: min(92vh, 900px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; padding: 22px 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 24px 80px rgba(11, 34, 51, .28); }
+.form-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.form-modal-head h2 { margin: 0; color: var(--ink); font-size: 21px; }
+.form-modal form { min-height: 0; overflow-y: auto; padding-bottom: 0; }
+.form-modal form > h3 { display: none; }
+.form-modal .staff-form { grid-template-columns: minmax(0, 1fr); }
+.form-modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.form-modal form .detail-facts { padding: 0; background: transparent; }
+.patient-modal { z-index: 30; }
 .triage-modal { width: min(780px, 100%); max-height: min(92vh, 900px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 24px 80px rgba(11, 34, 51, .28); }
 .triage-modal-head { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
 .triage-modal-head h2 { margin: 0; color: var(--ink); font-size: 22px; }
@@ -325,6 +334,11 @@ td strong { color: var(--ink); font-size: 13px; }
   .visual-panel { display: none; }
   .form-panel { flex: 1; min-width: 0; min-height: 100vh; padding: 32px 24px; }
   .login-card { max-width: 380px; }
+}
+@media (max-width: 600px) {
+  .modal-backdrop { align-items: end; padding: 0; }
+  .form-modal { width: 100%; max-height: 94vh; padding: 18px 16px; border-radius: 12px 12px 0 0; }
+  .form-modal form .detail-facts { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 480px) {
   .form-panel { align-items: flex-start; padding: 24px 20px; }

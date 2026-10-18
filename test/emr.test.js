@@ -409,6 +409,28 @@ test('role-based EMR workflows preserve clinical access boundaries', { timeout: 
     assert.equal(patient.previous_medical_history, 'No known chronic conditions.');
     assert.equal(Object.hasOwn(patient, 'diagnoses'), false);
 
+    const editedPatient = await request(`/api/patients/${patient.id}`, {
+      cookie: clerkCookie,
+      method: 'PATCH',
+      body: {
+        medicalRecordNumber: patient.medical_record_number,
+        firstName: patient.first_name,
+        middleName: 'Fictional Middle',
+        lastName: patient.last_name,
+        dateOfBirth: '1990-04-12',
+        nextOfKinName: 'Fictional Relative',
+        nextOfKinRelationship: 'Aunt',
+        nextOfKinContact: '555-0100',
+        address: 'Fictional test address',
+        previousMedicalHistory: 'Updated fictional medical history.'
+      }
+    });
+    assert.equal(editedPatient.response.status, 200);
+    assert.equal(editedPatient.payload.patient.middle_name, 'Fictional Middle');
+    assert.equal(editedPatient.payload.patient.address, 'Fictional test address');
+    assert.equal(editedPatient.payload.patient.next_of_kin_relationship, 'Aunt');
+    assert.equal(editedPatient.payload.patient.previous_medical_history, 'Updated fictional medical history.');
+
     const duplicatePatient = await request('/api/patients', {
       cookie: clerkCookie,
       method: 'POST',

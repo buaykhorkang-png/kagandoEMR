@@ -236,28 +236,174 @@ function renderShell(content) {
         <main class="workspace-content">${content}</main>
       </section>
     </div>
-    <div id="toast-region" aria-live="polite" aria-atomic="true"></div>`;
+    <div id="toast-region" aria-live="polite" aria-atomic="true"></div>${renderPatientModal()}`;
+    enhanceFormModals();
 }
+
+  function enhanceFormModals() {
+    const modalForms = new Set([
+      'patient-update', 'clinical', 'appointment-book', 'appointment-reschedule', 'check-in', 'clinical-complete',
+      'prescription', 'lab-request', 'lab-result', 'lab-catalogue', 'lab-catalogue-update',
+      'lab-configure', 'lab-specimen', 'lab-cancel', 'dispense', 'medicine-create', 'stock-receive',
+      'stock-adjustment', 'batch-status', 'user-create', 'followup'
+    ]);
+    const actionLabels = {
+      'patient-update': 'Edit patient details',
+      clinical: 'Edit clinical record',
+      'appointment-book': 'Book appointment',
+      'appointment-reschedule': 'Reschedule',
+      'check-in': 'Confirm patient check-in',
+      'clinical-complete': 'Add consultation notes',
+      prescription: 'Write prescription',
+      'lab-request': 'Request laboratory test',
+      'lab-result': 'Enter or amend result',
+      'lab-catalogue': 'Add test definition',
+      'lab-catalogue-update': 'Edit test definition',
+      'lab-configure': 'Map legacy request',
+      'lab-specimen': 'Update specimen',
+      'lab-cancel': 'Cancel request',
+      dispense: 'Dispense prescription',
+      'medicine-create': 'Add medicine',
+      'stock-receive': 'Receive stock',
+      'stock-adjustment': 'Adjust stock',
+      'batch-status': 'Update batch status',
+      'user-create': 'Add staff account',
+      followup: 'Schedule follow-up'
+    };
+
+    root.querySelectorAll('form[data-form]').forEach((form) => {
+      if (!modalForms.has(form.dataset.form) || form.dataset.modalReady === 'true') return;
+      const title = form.querySelector('h3')?.textContent.trim() || actionLabels[form.dataset.form];
+      const label = form.dataset.form === 'lab-specimen' ? title : actionLabels[form.dataset.form];
+      const launcher = document.createElement('button');
+      launcher.className = 'button secondary small form-modal-launcher';
+      launcher.type = 'button';
+      launcher.textContent = label;
+      launcher.dataset.action = 'open-form-modal';
+      form.before(launcher);
+      form.hidden = true;
+      form.dataset.modalReady = 'true';
+      form._modalTitle = title;
+      form._modalLauncher = launcher;
+    });
+  }
+
+  function openFormModal(form) {
+    if (!form || document.querySelector('.form-modal-backdrop')) return;
+    const placeholder = document.createComment('modal form placeholder');
+    form.before(placeholder);
+    form.hidden = false;
+    form.classList.add('modal-form');
+    form._modalPlaceholder = placeholder;
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop form-modal-backdrop';
+    backdrop.dataset.formModalBackdrop = '';
+    const dialog = document.createElement('section');
+    dialog.className = 'form-modal';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'form-modal-title');
+    dialog.tabIndex = -1;
+    const header = document.createElement('header');
+    header.className = 'form-modal-head';
+    const title = document.createElement('h2');
+    title.id = 'form-modal-title';
+    title.textContent = form._modalTitle;
+    const close = document.createElement('button');
+    close.className = 'button secondary small';
+    close.type = 'button';
+    close.textContent = 'Close';
+    close.setAttribute('aria-label', `Close ${form._modalTitle}`);
+    close.dataset.action = 'close-form-modal';
+    header.append(title, close);
+    const footer = document.createElement('div');
+    footer.className = 'form-modal-foot';
+    const cancel = document.createElement('button');
+    cancel.className = 'button secondary';
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.dataset.action = 'close-form-modal';
+    footer.append(cancel);
+    dialog.append(header, form, footer);
+    backdrop.append(dialog);
+    root.append(backdrop);
+    dialog.querySelector('input:not([type="hidden"]), select, textarea, button[type="submit"]')?.focus();
+  }
+
+  function openCheckInModal(patientId, appointmentId, patientName, launcher) {
+    const form = document.createElement('form');
+    form.className = 'inline-form';
+    form.dataset.form = 'check-in';
+    form.dataset.modalReady = 'true';
+    form.dataset.temporaryModal = 'true';
+    form._modalTitle = 'Confirm patient check-in';
+    form._modalLauncher = launcher;
+    form.innerHTML = `<input type="hidden" name="patientId" value="${escapeHtml(patientId)}">
+      ${appointmentId ? `<input type="hidden" name="appointmentId" value="${escapeHtml(appointmentId)}">` : ''}
+      <p>Check in <strong>${escapeHtml(patientName || 'this patient')}</strong> to today's clinical queue?</p>
+      <button class="button" type="submit">Confirm check-in</button><p class="error-message" role="alert"></p>`;
+    root.append(form);
+    openFormModal(form);
+  }
+
+  function closeFormModal(submitted = false) {
+    const backdrop = document.querySelector('.form-modal-backdrop');
+    const form = backdrop?.querySelector('form[data-modal-ready="true"]');
+    if (!backdrop || !form) return;
+    if (!submitted && form.dataset.submitting === 'true') return;
+    if (!submitted && form.dataset.dirty === 'true' && !window.confirm('Discard unsaved changes?')) return;
+    const launcher = form._modalLauncher;
+    if (submitted || form.dataset.dirty === 'true') {
+      form.reset();
+      setFormError(form, '');
+      delete form.dataset.dirty;
+    }
+    if (form.dataset.temporaryModal === 'true') {
+      form._modalPlaceholder?.remove();
+      backdrop.remove();
+      form.remove();
+      launcher?.focus();
+      return;
+    }
+    form.hidden = true;
+    form.classList.remove('modal-form');
+    if (form._modalPlaceholder?.isConnected) form._modalPlaceholder.replaceWith(form);
+    backdrop.remove();
+    launcher?.focus();
+  }
 
 function renderPatientForm() {
   if (!state.user.permissions.includes('patients.create')) return '';
   return `<form class="inline-form" data-form="patient-create">
-    <h3>Register patient</h3>
     <div class="detail-facts">
       <div class="field"><label for="new-mrn">Medical record number (generated if blank)</label><input id="new-mrn" name="medicalRecordNumber" maxlength="40"></div>
       <div class="field"><label for="new-dob">Date of birth</label><input id="new-dob" name="dateOfBirth" type="date"></div>
       <div class="field"><label for="new-first">First name</label><input id="new-first" name="firstName" maxlength="100" required></div>
+      <div class="field"><label for="new-middle">Middle name</label><input id="new-middle" name="middleName" maxlength="100"></div>
       <div class="field"><label for="new-last">Last name</label><input id="new-last" name="lastName" maxlength="100" required></div>
       <div class="field"><label for="new-gender">Gender</label><select id="new-gender" name="gender"><option value="">Not recorded</option><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></div>
       <div class="field"><label for="new-phone">Phone</label><input id="new-phone" name="phoneNumber" maxlength="30"></div>
+      <div class="field"><label for="new-address">Address</label><input id="new-address" name="address" maxlength="5000"></div>
       <div class="field"><label for="new-kin">Next of kin</label><input id="new-kin" name="nextOfKinName" maxlength="200"></div>
       <div class="field"><label for="new-kin-relationship">Next of kin relationship</label><input id="new-kin-relationship" name="nextOfKinRelationship" maxlength="80" placeholder="Mother, spouse, guardian..."></div>
       <div class="field"><label for="new-kin-contact">Next of kin contact</label><input id="new-kin-contact" name="nextOfKinContact" maxlength="100"></div>
       <div class="field"><label for="new-medical-history">Previous medical history</label><textarea id="new-medical-history" name="previousMedicalHistory" maxlength="12000" placeholder="Chronic illnesses, surgeries, allergies, or prior diagnoses"></textarea></div>
     </div>
-    <div class="button-row"><button class="button" type="submit">Create patient</button><button class="button secondary" type="button" data-action="cancel-patient">Cancel</button></div>
+    <div class="button-row"><button class="button" type="submit">Save patient</button><button class="button secondary" type="button" data-action="cancel-patient">Cancel</button></div>
     <p class="error-message" role="alert"></p>
   </form>`;
+}
+
+function renderPatientModal() {
+  if (!state.showPatientForm) return '';
+  return `<div class="modal-backdrop patient-modal" data-patient-modal>
+    <section class="form-modal" role="dialog" aria-modal="true" aria-labelledby="patient-modal-title" tabindex="-1">
+      <header class="form-modal-head"><h2 id="patient-modal-title">Register patient</h2>
+        <button class="button secondary small" type="button" data-action="cancel-patient" aria-label="Close patient registration">Close</button></header>
+      ${renderPatientForm()}
+    </section>
+  </div>`;
 }
 
 function renderPatientRows() {
@@ -311,18 +457,22 @@ function renderPatientDetail() {
       <div class="field"><label for="edit-mrn">Medical record number</label><input id="edit-mrn" name="medicalRecordNumber" value="${escapeHtml(patient.medical_record_number)}" maxlength="40" required></div>
       <div class="detail-facts">
         <div class="field"><label for="edit-first">First name</label><input id="edit-first" name="firstName" value="${escapeHtml(patient.first_name)}" maxlength="100" required></div>
+        <div class="field"><label for="edit-middle">Middle name</label><input id="edit-middle" name="middleName" value="${escapeHtml(patient.middle_name || '')}" maxlength="100"></div>
         <div class="field"><label for="edit-last">Last name</label><input id="edit-last" name="lastName" value="${escapeHtml(patient.last_name)}" maxlength="100" required></div>
       </div>
       <div class="field"><label for="edit-dob">Date of birth</label><input id="edit-dob" name="dateOfBirth" type="date" value="${escapeHtml(String(patient.date_of_birth || '').slice(0, 10))}"></div>
       <div class="field"><label for="edit-gender">Gender</label><select id="edit-gender" name="gender"><option value="">Not recorded</option><option value="female" ${patient.gender === 'female' ? 'selected' : ''}>Female</option><option value="male" ${patient.gender === 'male' ? 'selected' : ''}>Male</option><option value="other" ${patient.gender === 'other' ? 'selected' : ''}>Other</option></select></div>
       <div class="field"><label for="edit-phone">Phone</label><input id="edit-phone" name="phoneNumber" value="${escapeHtml(patient.phone_number || '')}" maxlength="30"></div>
+      <div class="field"><label for="edit-address">Address</label><textarea id="edit-address" name="address" maxlength="5000">${escapeHtml(patient.address || '')}</textarea></div>
       <div class="field"><label for="edit-kin">Next of kin</label><input id="edit-kin" name="nextOfKinName" value="${escapeHtml(patient.next_of_kin_name || '')}" maxlength="200"></div>
+      <div class="field"><label for="edit-kin-relationship">Next of kin relationship</label><input id="edit-kin-relationship" name="nextOfKinRelationship" value="${escapeHtml(patient.next_of_kin_relationship || '')}" maxlength="80"></div>
       <div class="field"><label for="edit-kin-contact">Next of kin contact</label><input id="edit-kin-contact" name="nextOfKinContact" value="${escapeHtml(patient.next_of_kin_contact || '')}" maxlength="100"></div>
+      <div class="field"><label for="edit-medical-history">Previous medical history</label><textarea id="edit-medical-history" name="previousMedicalHistory" maxlength="12000">${escapeHtml(patient.previous_medical_history || '')}</textarea></div>
       <button class="button" type="submit">Save patient details</button><p class="error-message" role="alert"></p>
     </form>`;
     if (state.user.permissions.includes('patients.checkin') || state.user.permissions.includes('appointments.create')) {
       controls += '<div class="button-row">';
-      if (state.user.permissions.includes('patients.checkin')) controls += `<button class="button" data-action="check-in-patient" data-patient="${escapeHtml(patient.id)}">Check in · get queue number</button>`;
+      if (state.user.permissions.includes('patients.checkin')) controls += `<button class="button" data-action="check-in-patient" data-patient="${escapeHtml(patient.id)}" data-patient-name="${escapeHtml(`${patient.first_name} ${patient.last_name}`)}">Check in · get queue number</button>`;
       if (state.user.permissions.includes('appointments.create')) controls += '<button class="button secondary" data-action="show-appointment-book">Book appointment</button>';
       controls += '</div>';
       if (state.showAppointmentForm) controls += appointmentBookingForm(patient.id);
@@ -467,6 +617,7 @@ function renderDashboard() {
   const content = `<div class="page-heading"><div><p class="eyebrow">${escapeHtml(activeMetric)}</p><h1>${escapeHtml(title)}</h1><p>Live data from Kagando EMR in PostgreSQL.</p></div><button class="button secondary" data-action="refresh-dashboard" type="button">Refresh</button></div>
     <div class="stats-grid">${metrics.join('')}</div>${detail}${triageModal}`;
   renderShell(content);
+  if (triageModal) document.querySelector('.triage-modal input')?.focus();
 }
 
 function appointmentsTable() {
@@ -475,7 +626,7 @@ function appointmentsTable() {
     <td><strong>${escapeHtml(appointment.last_name)}, ${escapeHtml(appointment.first_name)}</strong><br><span>${escapeHtml(appointment.medical_record_number)}</span></td>
     <td>${escapeHtml(appointment.reason || '—')}</td><td>${escapeHtml(appointment.status)}</td>
     <td>${appointment.status === 'booked' || appointment.status === 'rescheduled'
-      ? `${state.user.permissions.includes('patients.checkin') ? `<button class="button small" data-action="check-in-appointment" data-patient="${escapeHtml(appointment.patient_id)}" data-appointment="${escapeHtml(appointment.id)}">Check in</button>` : ''}
+      ? `${state.user.permissions.includes('patients.checkin') ? `<button class="button small" data-action="check-in-appointment" data-patient="${escapeHtml(appointment.patient_id)}" data-patient-name="${escapeHtml(`${appointment.first_name} ${appointment.last_name}`)}" data-appointment="${escapeHtml(appointment.id)}">Check in</button>` : ''}
         ${state.user.permissions.includes('appointments.cancel') ? `<button class="button secondary small" data-action="cancel-appointment" data-id="${escapeHtml(appointment.id)}">Cancel</button>` : ''}
         ${state.user.permissions.includes('appointments.edit') ? `<form data-form="appointment-reschedule" data-id="${escapeHtml(appointment.id)}"><input name="scheduledAt" type="datetime-local" required aria-label="New appointment time"><button class="button secondary small" type="submit">Reschedule</button><p class="error-message" role="alert"></p></form>` : ''}`
       : ''}</td>
@@ -584,7 +735,8 @@ function renderTriageModal(visit) {
         </div>
         <div class="field"><label>Nursing notes</label><textarea name="nursingNotes" maxlength="5000">${escapeHtml(visit.nursing_notes || '')}</textarea></div>
         <div class="button-row"><button class="button secondary" type="submit" value="false">Save triage</button>
-          <button class="button" type="submit" value="true">Save &amp; send to clinician</button></div>
+          <button class="button" type="submit" value="true">Save &amp; send to clinician</button>
+          <button class="button secondary" type="button" data-action="close-triage">Cancel</button></div>
         <p class="error-message" role="alert"></p>
       </form>
     </section>
@@ -850,11 +1002,11 @@ function renderPatients() {
         <div class="section-head"><h2>Patient list</h2><span>${state.patients.length} shown</span></div>
         <div class="toolbar search-toolbar"><label class="search-box"><input id="patient-search" type="search" value="${escapeHtml(state.search)}" placeholder="Search name or record number" aria-label="Search patients"></label></div>
         <div class="table-wrap"><table><thead><tr><th>Patient</th><th>Record no.</th><th>Date of birth</th><th>Updated</th></tr></thead><tbody>${renderPatientRows()}</tbody></table></div>
-        ${state.showPatientForm || state.view === 'registration' ? renderPatientForm() : ''}
       </section>
       ${renderPatientDetail()}
     </div>`;
   renderShell(content);
+  if (state.showPatientForm) document.querySelector('.patient-modal input')?.focus();
 }
 
 function renderPrescriptions() {
@@ -1139,8 +1291,16 @@ async function navigate(view) {
     renderDashboard();
     return;
   }
+  if (view === 'registration') {
+    state.showPatientForm = true;
+    state.error = '';
+    render();
+    if (['patients', 'checkin', 'registration'].includes(state.view)) await loadPatients();
+    document.querySelector('.patient-modal input')?.focus();
+    return;
+  }
   state.view = view;
-  if (view === 'registration') state.showPatientForm = true;
+  state.showPatientForm = false;
   if (view === 'checkin') state.showPatientForm = false;
   state.error = '';
   render();
@@ -1177,8 +1337,14 @@ async function handleSubmit(event) {
   const form = event.target.closest('form[data-form]');
   if (!form) return;
   event.preventDefault();
-  const button = form.querySelector('button[type="submit"]');
-  if (button) button.disabled = true;
+  const button = event.submitter || form.querySelector('button[type="submit"]');
+  if (button) {
+    button.disabled = true;
+    button.dataset.originalText = button.textContent;
+    button.textContent = 'Saving...';
+  }
+  form.dataset.submitting = 'true';
+  form.setAttribute('aria-busy', 'true');
   setFormError(form, '');
 
   try {
@@ -1267,6 +1433,21 @@ async function handleSubmit(event) {
       state.appointments = (await api('/api/workflow/appointments')).appointments;
       renderDashboard();
       toast('Appointment rescheduled.');
+    } else if (form.dataset.form === 'check-in') {
+      const payload = await api('/api/workflow/check-in', {
+        method: 'POST',
+        body: JSON.stringify({
+          patientId: values.patientId,
+          ...(values.appointmentId ? { appointmentId: values.appointmentId } : {})
+        })
+      });
+      toast(`Checked in. Queue number ${payload.visit.queue_number}.`);
+      if (state.user.permissions.includes('appointments.view')) {
+        state.appointments = (await api('/api/workflow/appointments')).appointments;
+      }
+      if (state.activePatient) await openPatient(state.activePatient.id);
+      else if (['patients', 'checkin', 'registration'].includes(state.view)) await loadPatients();
+      else await loadDashboard();
     } else if (form.dataset.form === 'followup') {
       values.patientId = form.dataset.patient;
       await api('/api/workflow/appointments/follow-up', { method: 'POST', body: JSON.stringify(values) });
@@ -1416,24 +1597,43 @@ async function handleSubmit(event) {
       renderDashboard();
       toast('Result saved for independent verification.');
     }
+    if (form.dataset.modalReady === 'true') closeFormModal(true);
   } catch (error) {
     if (['login', 'registration', 'password-change'].includes(form.dataset.form)) state.error = error.message;
     setFormError(form, error.message);
     if (form.dataset.form === 'login' || form.dataset.form === 'registration') renderLogin();
     if (form.dataset.form === 'password-change') renderPasswordChange();
   } finally {
-    if (button && button.isConnected) button.disabled = false;
+    delete form.dataset.submitting;
+    form.removeAttribute('aria-busy');
+    if (button && button.isConnected) {
+      button.disabled = false;
+      if (button.dataset.originalText !== undefined) {
+        button.textContent = button.dataset.originalText;
+        delete button.dataset.originalText;
+      }
+    }
   }
 }
 
 document.addEventListener('submit', handleSubmit);
 
 document.addEventListener('click', async (event) => {
+  if (event.target.matches('[data-form-modal-backdrop]')) {
+    closeFormModal();
+    return;
+  }
+  if (event.target.matches('[data-patient-modal]')) {
+    closePatientModal();
+    return;
+  }
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const { action, id } = button.dataset;
   try {
     if (action === 'navigate') await navigate(button.dataset.view);
+    if (action === 'open-form-modal') openFormModal(button.nextElementSibling);
+    if (action === 'close-form-modal') closeFormModal();
     if (action === 'open-triage') {
       if (button.dataset.id) {
         const visit = state.queue.find((entry) => entry.id === button.dataset.id);
@@ -1446,6 +1646,9 @@ document.addEventListener('click', async (event) => {
       }
     }
     if (action === 'close-triage') {
+      const triageForm = document.querySelector('.triage-modal form');
+      if (triageForm?.dataset.submitting === 'true') return;
+      if (triageForm?.dataset.dirty === 'true' && !window.confirm('Discard unsaved triage observations?')) return;
       state.activeTriageVisit = null;
       renderDashboard();
     }
@@ -1475,25 +1678,16 @@ document.addEventListener('click', async (event) => {
       render();
     }
     if (action === 'toggle-patient-form') { state.showPatientForm = !state.showPatientForm; renderPatients(); }
-    if (action === 'cancel-patient') { state.showPatientForm = false; renderPatients(); }
+    if (action === 'cancel-patient') closePatientModal();
     if (action === 'open-patient') await openPatient(id);
     if (action === 'close-patient') { state.activePatient = null; renderPatients(); }
-    if (action === 'show-appointment-book') { state.showAppointmentForm = !state.showAppointmentForm; renderPatients(); }
+    if (action === 'show-appointment-book') {
+      state.showAppointmentForm = true;
+      renderPatients();
+      openFormModal(document.querySelector('[data-form="appointment-book"]'));
+    }
     if (action === 'check-in-patient' || action === 'check-in-appointment') {
-      const payload = await api('/api/workflow/check-in', {
-        method: 'POST',
-        body: JSON.stringify({
-          patientId: button.dataset.patient,
-          ...(button.dataset.appointment ? { appointmentId: button.dataset.appointment } : {})
-        })
-      });
-      toast(`Checked in. Queue number ${payload.visit.queue_number}.`);
-      if (state.user.permissions.includes('appointments.view')) {
-        state.appointments = (await api('/api/workflow/appointments')).appointments;
-      }
-      if (state.activePatient) await openPatient(state.activePatient.id);
-      if (state.view === 'dashboard') await loadDashboard();
-      else renderDashboard();
+      openCheckInModal(button.dataset.patient, button.dataset.appointment, button.dataset.patientName, button);
     }
     if (action === 'cancel-appointment') {
       await api(`/api/workflow/appointments/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ action: 'cancel' }) });
@@ -1521,6 +1715,11 @@ document.addEventListener('click', async (event) => {
       const panel = document.querySelector('.detail-panel');
       if (panel && !panel.querySelector('[data-form="prescription"]')) {
         panel.insertAdjacentHTML('beforeend', `<form class="inline-form" data-form="prescription"><h3>New prescription</h3><div class="field"><label for="medication">Catalogue medicine</label><select id="medication" name="medicineId" required><option value="">Select medicine</option>${state.medicines.map((medicine) => `<option value="${escapeHtml(medicine.id)}">${escapeHtml(medicine.name)} · ${escapeHtml(medicine.strength || '')} ${escapeHtml(medicine.dosage_form || '')}</option>`).join('')}</select></div><div class="field"><label for="dose">Dose</label><input id="dose" name="dose" maxlength="200" required></div><div class="detail-facts"><div class="field"><label for="frequency">Frequency</label><input id="frequency" name="frequency" maxlength="100"></div><div class="field"><label for="duration">Duration</label><input id="duration" name="duration" maxlength="100"></div><div class="field"><label for="quantity">Quantity</label><input id="quantity" name="quantity" type="number" min="1" required></div></div><div class="field"><label for="instructions">Instructions</label><textarea id="instructions" name="instructions" maxlength="2000"></textarea></div><button class="button" type="submit">Create prescription</button><p class="error-message" role="alert"></p></form>`);
+      }
+      const prescriptionForm = panel?.querySelector('[data-form="prescription"]');
+      if (prescriptionForm) {
+        enhanceFormModals();
+        openFormModal(prescriptionForm);
       }
     }
     if (action === 'archive-patient' && window.confirm('Archive this patient? The record will be retained and removed from routine search.')) {
@@ -1563,6 +1762,61 @@ document.addEventListener('click', async (event) => {
     }
   } catch (error) {
     toast(error.message);
+  }
+});
+
+function closePatientModal() {
+  const form = document.querySelector('.patient-modal [data-form="patient-create"]');
+  if (form?.dataset.submitting === 'true') return;
+  if (form?.dataset.dirty === 'true' && !window.confirm('Discard unsaved patient details?')) return;
+  state.showPatientForm = false;
+  render();
+  (document.querySelector('[data-action="toggle-patient-form"]') ||
+    document.querySelector('.nav-button[data-view="registration"]'))?.focus();
+}
+
+document.addEventListener('input', (event) => {
+  const form = event.target.closest('.patient-modal form');
+  if (form) form.dataset.dirty = 'true';
+  const modalForm = event.target.closest('.form-modal-backdrop form');
+  if (modalForm) modalForm.dataset.dirty = 'true';
+  const triageForm = event.target.closest('.triage-modal form');
+  if (triageForm) triageForm.dataset.dirty = 'true';
+});
+
+document.addEventListener('change', (event) => {
+  const patientForm = event.target.closest('.patient-modal form');
+  if (patientForm) patientForm.dataset.dirty = 'true';
+  const form = event.target.closest('.form-modal-backdrop form');
+  if (form) form.dataset.dirty = 'true';
+  const triageForm = event.target.closest('.triage-modal form');
+  if (triageForm) triageForm.dataset.dirty = 'true';
+});
+
+document.addEventListener('keydown', (event) => {
+  const dialog = document.querySelector('.form-modal-backdrop [role="dialog"], .patient-modal [role="dialog"], .triage-modal[role="dialog"]');
+  if (!dialog) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (dialog.closest('.patient-modal')) closePatientModal();
+    else if (dialog.closest('.triage-modal')) document.querySelector('[data-action="close-triage"]')?.click();
+    else closeFormModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = Array.from(dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)'));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!dialog.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 });
 
